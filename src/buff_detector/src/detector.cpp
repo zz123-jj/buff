@@ -330,7 +330,7 @@ bool BuffDetector::preprocess_image(cv::Mat& frame)
     return true;
 }
 
-bool BuffDetector::update_fan_blades(cv::Mat& image)
+bool BuffDetector::detect_fan_blades(cv::Mat& image)
 {
     // 创建遮罩遮挡无关部分
     const cv::Mat mask = cv::Mat::ones(image.size(), CV_8UC1);

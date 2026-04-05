@@ -115,32 +115,21 @@ struct Point3D {
     Point3D() : x(0), y(0), z(0) {}
     Point3D(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
 };
-/**
- * 3D预测器类：将2D预测结果转换为3D坐标
- * 已知能量机关半径为1.4米
- */
+//3D预测器类：将2D预测结果转换为3D坐标
+//已知能量机关半径为1.4米
+
 class Predictor3D {
 private:
     CameraParams cam_;          // 相机内参
     float radius_world_;        // 目标实际半径（米），默认1.4m
 public:
-    /**
-     * 构造函数
-     * @param cam 相机内参
-     * @param radius_world 目标实际半径（米），默认1.4m
-     */
+    
     Predictor3D(const CameraParams& cam, float radius_world = 1.4f);
-    /**
-     * 设置相机参数
-     */
+    
     void set_camera_params(const CameraParams& cam) { cam_ = cam; }
-    /**
-     * 设置目标半径
-     */
+    
     void set_radius(float radius) { radius_world_ = radius; }
-    /**
-     * 获取相机参数
-     */
+    
     CameraParams get_camera_params() const { return cam_; }
     /**
      * 通过已知半径计算深度
