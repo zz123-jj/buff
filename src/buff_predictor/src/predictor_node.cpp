@@ -6,7 +6,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include "buff_interfaces/msg/buff_target.hpp"
-#include "buff_interfaces/msg/buff_prediction.hpp"
 #include "buff_interfaces/msg/buff_aiming_data.hpp"
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
@@ -17,6 +16,7 @@
 #include <fstream>
 #include <iomanip>
 #include <cmath>
+#include <string>
 
 class BuffPredictorNode : public rclcpp::Node
 {
@@ -27,10 +27,10 @@ public:
         radius_filter_ = std::make_unique<MovAvg>(15);
 
         // 算法初始化（使用配置参数）
-        predictor_ = std::make_unique<Big_Buff_Predictor>(DELTA_T);
+        predictor_ = std::make_unique<Big_Buff_Predictor>();
         
         // 角度连续化初始化
-        angle_observer_ = std::make_unique<angleObserver>(clockMode::anticlockwise);
+        angle_observer_ = std::make_unique<angleObserver>(clockMode::unknown);
 
         // 3D解算初始化（使用配置参数）
         CameraParams cam_params(1303.675283386667f, 1303.675283386667f, 720.0f, 540.0f);
@@ -39,10 +39,10 @@ public:
         CoordinateSolver::CameraIntrinsics coord_params = {1303.675283386667f, 1303.675283386667f, 720.0f, 540.0f};
         coord_solver_ = std::make_unique<CoordinateSolver>(coord_params);
 
-        // Sub & Pub
+    
         target_sub_ = this->create_subscription<buff_interfaces::msg::BuffTarget>(
             "/buff_target", 10,
-            std::bind(&BuffPredictorNode::targetCallback, this, std::placeholders::_1));
+            [this](const buff_interfaces::msg::BuffTarget::SharedPtr msg) { targetCallback(msg); });
 
         aiming_pub_ = this->create_publisher<buff_interfaces::msg::BuffAimingData>(
             "/buff/aiming_data", 10);
@@ -51,13 +51,51 @@ public:
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
-        prediction_pub_ = this->create_publisher<buff_interfaces::msg::BuffPrediction>("/buff_prediction", 10);
+        target_frame_ = this->declare_parameter<std::string>("target_frame", "camera_optical_frame");
+        camera_frame_ = this->declare_parameter<std::string>("camera_frame", "camera_optical_frame");
+
         if (DEBUG_MODE) {
             tracker_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/tracker/debug_point", 10);
         }
     }
 
 private:
+    bool transformPointToTarget(
+        const geometry_msgs::msg::PointStamped& input,
+        const builtin_interfaces::msg::Time& stamp,
+        geometry_msgs::msg::PointStamped& output)
+    {
+        if (input.header.frame_id == target_frame_) {
+            output = input;
+            return true;
+        }
+
+        try
+        {
+            auto tf_stamped = tf_buffer_->lookupTransform(
+                target_frame_,
+                input.header.frame_id,
+                stamp,
+                tf2::durationFromSec(0.05)
+            );
+            tf2::doTransform(input, output, tf_stamped);
+            return true;
+        }
+        catch (const tf2::TransformException &ex)
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "TF Error(target=%s, source=%s): %s",
+                target_frame_.c_str(),
+                input.header.frame_id.c_str(),
+                ex.what()
+            );
+            return false;
+        }
+    }
+
     void targetCallback(const buff_interfaces::msg::BuffTarget::SharedPtr msg)
     {
         // 计算向量：扇叶框中心 - R框中心
@@ -111,110 +149,54 @@ private:
         //更新预测器
         auto result = predictor_->update(continues_angle, stamp_sec_limited);
         bool success = result.first;
-        float angle_delta = result.second;
 
         geometry_msgs::msg::PointStamped point_odom;
         geometry_msgs::msg::PointStamped target_odom;
 
-
-        //发布buffPrediction（不依赖TF，始终发布）
-        auto pred_msg = buff_interfaces::msg::BuffPrediction();
-        pred_msg.header.stamp = msg->header.stamp;
-        pred_msg.header.frame_id = "odom";
-        pred_msg.is_fitted = success;
-        pred_msg.angle_delta = angle_delta;
-        pred_msg.frame_number = frame_count_;
-        pred_msg.current_angle = continues_angle;
-
-        // 填入sin参数
-        if (success) {
-            const auto sin_para = predictor_->get_sin_para();
-            if (sin_para.size() >= 4) {
-                pred_msg.sin_a = sin_para[0];
-                pred_msg.sin_omega = sin_para[1];
-                pred_msg.sin_phi = sin_para[2];
-                pred_msg.sin_b = sin_para[3];
-            }
-        }
-        prediction_pub_->publish(pred_msg);
-
         // TF 变换与坐标解算
-        try
-        {
-            // 计算深度
-            float depth = predictor_3d_->compute_depth(pixel_arm_length);
+        // 计算深度
+        float depth = predictor_3d_->compute_depth(pixel_arm_length);
 
-            // R标坐标
-            auto p_cam_pt = coord_solver_->pixelToCamera(msg->r_center_x, msg->r_center_y, depth);
+        // R标坐标
+        auto p_cam_pt = coord_solver_->pixelToCamera(msg->r_center_x, msg->r_center_y, depth);
 
-            geometry_msgs::msg::PointStamped point_cam;
-            point_cam.header.stamp = msg->header.stamp; // 对齐时间戳
-            point_cam.header.frame_id = "camera_optical_frame";
-            point_cam.point.x = p_cam_pt.x;
-            point_cam.point.y = p_cam_pt.y;
-            point_cam.point.z = p_cam_pt.z;
+        geometry_msgs::msg::PointStamped point_cam;
+        point_cam.header.stamp = msg->header.stamp; // 对齐时间戳
+        point_cam.header.frame_id = camera_frame_;
+        point_cam.point.x = p_cam_pt.x;
+        point_cam.point.y = p_cam_pt.y;
+        point_cam.point.z = p_cam_pt.z;
 
-
-            // TF2 转换到 Odom
-            // tf_buffer_->transform 处理旋转和平移
-            geometry_msgs::msg::TransformStamped tf_stamped =
-                tf_buffer_->lookupTransform(
-                    "odom", // 目标帧
-                    point_cam.header.frame_id, // 源帧（point_cam的坐标系）
-                    msg->header.stamp, // 时间戳
-                    tf2::durationFromSec(0.05) // 超时时间
-                );
-
-            tf2::doTransform(point_cam, point_odom, tf_stamped);
-
-            // Debug Point（仅在debug模式下发布）
-            if (DEBUG_MODE)
-            {
-                tracker_pub_->publish(point_odom);
-            }
-
-            // target point
-            auto target_point_pt = coord_solver_->pixelToCamera(
-                msg->target_center_x, msg->target_center_y, depth);
-
-            geometry_msgs::msg::PointStamped target_point_cam;
-            target_point_cam.header.stamp = msg->header.stamp;
-            target_point_cam.header.frame_id = "camera_optical_frame";
-            target_point_cam.point.x = target_point_pt.x;
-            target_point_cam.point.y = target_point_pt.y;
-            target_point_cam.point.z = target_point_pt.z;
-
-            
-
-            geometry_msgs::msg::TransformStamped tf_stamped_target =
-                tf_buffer_->lookupTransform(
-                    "odom", // 目标帧
-                    target_point_cam.header.frame_id, // 源帧（target_point_cam的坐标系）
-                    msg->header.stamp, // 时间戳
-                    tf2::durationFromSec(0.05) // 超时时间
-                );
-
-            tf2::doTransform(target_point_cam, target_odom, tf_stamped_target);
-
-        
-
-        }
-        catch (const tf2::TransformException &ex)
-        {
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "TF Error: %s", ex.what());
-            return; // TF失败时跳过3D坐标填充，prediction已在前面发布
+        if (!transformPointToTarget(point_cam, msg->header.stamp, point_odom)) {
+            return;
         }
 
-        // TF成功时填入3D坐标并发布aiming数据
-        pred_msg.r_center_odom.x = point_odom.point.x;
-        pred_msg.r_center_odom.y = point_odom.point.y;
-        pred_msg.r_center_odom.z = point_odom.point.z;
+        // Debug Point（仅在debug模式下发布）
+        if (DEBUG_MODE)
+        {
+            tracker_pub_->publish(point_odom);
+        }
+
+        // target point
+        auto target_point_pt = coord_solver_->pixelToCamera(
+            msg->target_center_x, msg->target_center_y, depth);
+
+        geometry_msgs::msg::PointStamped target_point_cam;
+        target_point_cam.header.stamp = msg->header.stamp;
+        target_point_cam.header.frame_id = camera_frame_;
+        target_point_cam.point.x = target_point_pt.x;
+        target_point_cam.point.y = target_point_pt.y;
+        target_point_cam.point.z = target_point_pt.z;
+
+        if (!transformPointToTarget(target_point_cam, msg->header.stamp, target_odom)) {
+            return;
+        }
 
         // 发布调试点 (仅在 DEBUG_MODE)
         if (DEBUG_MODE) {
             auto debug_point_msg = geometry_msgs::msg::PointStamped();
             debug_point_msg.header.stamp = msg->header.stamp;
-            debug_point_msg.header.frame_id = "odom";
+            debug_point_msg.header.frame_id = target_frame_;
             debug_point_msg.point = target_odom.point;
             tracker_pub_->publish(debug_point_msg);
         }
@@ -222,16 +204,24 @@ private:
         // buffAimingData 发布（仅在TF成功时有3D坐标）
         auto aiming_msg = buff_interfaces::msg::BuffAimingData();
         aiming_msg.header.stamp = this->now();
-        aiming_msg.header.frame_id = "odom";
+        aiming_msg.header.frame_id = target_frame_;
         aiming_msg.frame_number = frame_count_;
         aiming_msg.is_tracking = success;
         aiming_msg.r_center_x_3d = point_odom.point.x;
         aiming_msg.r_center_y_3d = point_odom.point.y;
         aiming_msg.r_center_z_3d = point_odom.point.z;
-        aiming_msg.angle_delta = angle_delta;
         aiming_msg.pixel_r_center_x = msg->r_center_x;
         aiming_msg.pixel_r_center_y = msg->r_center_y;
         aiming_msg.pixel_radius = pixel_arm_length;
+        if (success) {
+            const auto sin_para = predictor_->get_sin_para();
+            if (sin_para.size() >= 4) {
+                aiming_msg.sin_a = sin_para[0];
+                aiming_msg.sin_omega = sin_para[1];
+                aiming_msg.sin_phi = sin_para[2];
+                aiming_msg.sin_b = sin_para[3];
+            }
+        }
         aiming_msg.target_x_3d = target_odom.point.x;
         aiming_msg.target_y_3d = target_odom.point.y;
         aiming_msg.target_z_3d = target_odom.point.z;
@@ -240,7 +230,6 @@ private:
 
     // ROS2 Components
     rclcpp::Subscription<buff_interfaces::msg::BuffTarget>::SharedPtr target_sub_;
-    rclcpp::Publisher<buff_interfaces::msg::BuffPrediction>::SharedPtr prediction_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr tracker_pub_;
     rclcpp::Publisher<buff_interfaces::msg::BuffAimingData>::SharedPtr aiming_pub_;
 
@@ -260,6 +249,10 @@ private:
     bool first_frame_ = true;
     bool params_published_ = false;
     int frame_count_ = 0;
+
+    // TF frame settings
+    std::string target_frame_;
+    std::string camera_frame_;
 
     // Joint
     double current_pitch_ = 0.0;

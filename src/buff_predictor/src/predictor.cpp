@@ -1,8 +1,6 @@
 #include "predictor.hpp"
 
-//time: 需要向未来预测的时间（秒）
-Big_Buff_Predictor::Big_Buff_Predictor(float time):
-    expectedDeltaTime_(time),                          // 预测时间（秒）
+Big_Buff_Predictor::Big_Buff_Predictor():
     Avg_filter_(5),                                    // 创建平滑滤波器
     frame_counter_(0),                                 // 当前帧计数
     start_detector_(1.5),                              // 使用1.5秒作为等待时间阈值
@@ -174,13 +172,7 @@ VectorXf Big_Buff_Predictor::sinFit(const VectorXf& x, const VectorXf& y) {
     return result;
 }
 
-// 目标函数：根据参数和x值计算积分形式正弦函数的y值
-// y = A * cos(ω * x + φ) + B * x + C
-float Big_Buff_Predictor::targetFunc(float x, float A, float omega, float phi, float B, float C) {
-    return A * std::cos(omega * x + phi) + B * x + C;
-}
-
-//返回值：pair<是否成功预测, 角度增量（预测角度相对当前角度的变化量）>
+//返回值：pair<是否成功预测, 角度增量（不再进行角度预测，此处恒返回0.0f）>
 std::pair<bool, float> Big_Buff_Predictor::update(float continues_angle, double stamp_sec) { 
     //1.对输入数据进行平滑处理
     float smoothed_angle = Avg_filter_.update(continues_angle);
@@ -222,20 +214,9 @@ std::pair<bool, float> Big_Buff_Predictor::update(float continues_angle, double 
         sin_para_ = sinFit(time_seq, smoothed_vector_datas);  // 拟合积分形式正弦函数
         is_get_para_ = true;
         
-        // 用拟合的函数计算角度增量
+        // 拟合成功后返回参数状态，不再计算未来角度
         if (is_get_para_) {
-            // 计算当前帧和未来帧的拟合角度
-            float fitted_current = targetFunc(
-                static_cast<float>(time_stamps_.back()),  // 当前时间
-                cos_para_[0], cos_para_[1], cos_para_[2], cos_para_[3], cos_para_[4]
-            );
-            float fitted_predicted = targetFunc(
-                static_cast<float>(time_stamps_.back() + expectedDeltaTime_),  // 未来时间
-                cos_para_[0], cos_para_[1], cos_para_[2], cos_para_[3], cos_para_[4]
-            );
-            // 返回角度增量
-            float angle_increment = fitted_predicted - fitted_current;
-            return {true, angle_increment};
+            return {true, 0.0f};
         }
     }
     
@@ -243,36 +224,8 @@ std::pair<bool, float> Big_Buff_Predictor::update(float continues_angle, double 
     return {false, 0.0f};
 }
 
-float Big_Buff_Predictor::predict_future_angle(float current_angle,float pred_time_s){
-    if(!is_get_para_){
-        return current_angle;
-    }
-
-    if (time_stamps_.empty()) {
-        return current_angle;
-    }
-    const float t_current = static_cast<float>(time_stamps_.back());
-    const float t_pred = t_current + pred_time_s;
-
-    //计算当前时间和未来时间的拟合角度
-    float fitted_current = targetFunc(
-        t_current,
-        cos_para_[0], cos_para_[1], cos_para_[2], cos_para_[3], cos_para_[4]
-    );
-    float fitted_predicted = targetFunc(
-        t_pred,
-        cos_para_[0], cos_para_[1], cos_para_[2], cos_para_[3], cos_para_[4]
-    );
-    //计算角度增量
-    float angle_increment = fitted_predicted - fitted_current;
-    //返回预测的未来角度
-    return current_angle + angle_increment;
-}
-
-
-smallPredictor::smallPredictor(float deltaT)
+smallPredictor::smallPredictor()
     : window_time_(1.5f),           // 窗口时间：1.5秒用于计算角速度
-      pred_delta_time_(deltaT),      // 预测时间（秒）
       angular_velocity_(0.0f) {
     // 基于时间的实现，不需要帧数
 }
@@ -316,9 +269,9 @@ void smallPredictor::reset() {
 // }
 
 std::pair<bool, float> smallPredictor::update(float angle, double timestamp) {
-    // 如果已经锁定预测，直接返回预测结果
+    // 如果已经锁定预测，直接返回状态
     if (std::abs(angular_velocity_) > 0.0001f) {
-        return {true, angular_velocity_ * pred_delta_time_};
+        return {true, 0.0f};
     }
     
     // 数据入队
@@ -346,17 +299,14 @@ std::pair<bool, float> smallPredictor::update(float angle, double timestamp) {
     float angle_diff = angles_.back() - angles_.front();
     float current_velocity = angle_diff / static_cast<float>(time_span);
     
-    // 计算本次的预测量（角度增量）
-    float current_prediction = current_velocity * pred_delta_time_;
-    
-    // 判断预测量是否合理（0.1 ~ 0.6 弧度）
-    if (std::abs(current_prediction) > 0.1f && std::abs(current_prediction) < 0.6f) {
+    // 判断角速度是否在一个合理范围内
+    if (std::abs(current_velocity) > 0.1f && std::abs(current_velocity) < 10.0f) {
         angular_velocity_ = current_velocity;  // 锁定角速度
-        return {true, current_prediction};
+        return {true, 0.0f};
     }
     
     // 预测量过大，重置数据
-    if (std::abs(current_prediction) >= 0.6f) {
+    if (std::abs(current_velocity) >= 10.0f) {
         angles_.clear();
         timestamps_.clear();
         angles_.push_back(angle);
@@ -365,13 +315,6 @@ std::pair<bool, float> smallPredictor::update(float angle, double timestamp) {
 
     // 没锁定时，返回 0
     return {false, 0.0f};
-}
-
-
-float smallPredictor::predict_future_angle(float current_angle, float pred_time_s){
-    // 直接基于角速度和时间计算角度增量
-    float angle_increment = angular_velocity_ * pred_time_s;
-    return current_angle + angle_increment;
 }
 
 
@@ -510,15 +453,47 @@ float angleObserver::AngleTransformer(float x, float y) {
 float angleObserver::update(float target_x, float target_y, float raduis) {
     const int NUM_BLADE_PLATES = 5;                                         //扇叶个数
     const float BLADE_ANGLE_INTERVAL = 2.0f * M_PI / NUM_BLADE_PLATES;  //扇叶间距72° = 2π/5
-    // 根据旋转方向确定旋转角度的符号
-    // 逆时针：正角度；顺时针：负角度
-    float rotation_sign = (mode_ == anticlockwise) ? 1.0f : -1.0f;
-    // 步骤1：首次调用，初始化上一帧位置
+    
+    // 1. 初始化第一帧
     bool first_call = (last_point_.x == -1.0f && last_point_.y == -1.0f);
     if (first_call) {
         last_point_.x = target_x;
         last_point_.y = target_y;
+        return AngleTransformer(target_x, target_y);
     }
+    
+    // 2. 如果方向是未知的，尝试进行方向判定
+    if (mode_ == clockMode::unknown) {
+        // 在没有跳变时（两帧之间距离在合理范围内），采集角度增量
+        float dist = euclidean_distance(last_point_, cv::Point2f(target_x, target_y));
+        if (dist < raduis * 0.8f) { // 小于半径认为没有发生跳变
+            float current_raw_angle = AngleTransformer(target_x, target_y); // 获取连续化角度
+            float angle_diff = current_raw_angle - last_angle_;
+            total_angle_diff_ += angle_diff;
+            direction_detect_count_++;
+            
+            // 累计采集到 5~10 帧数据后，再做出判断
+            if (direction_detect_count_ > 5) { 
+                if (total_angle_diff_ > 0) {
+                    mode_ = clockMode::anticlockwise; // 角度变大，逆时针
+                } else {
+                    mode_ = clockMode::clockwise;     // 角度变小，顺时针
+                }
+            }
+            
+            last_point_.x = target_x;
+            last_point_.y = target_y;
+            return current_raw_angle;
+        } else {
+            // 如果在方向未确定的时候就发生跳变，可以丢弃此帧或者重置判定
+            return AngleTransformer(target_x, target_y); 
+        }
+    }
+
+    // 根据旋转方向确定旋转角度的符号
+    // 逆时针：正角度；顺时针：负角度
+    float rotation_sign = (mode_ == anticlockwise) ? 1.0f : -1.0f;
+
     // 步骤2：如果之前发生过装甲板跳变，需要先对当前坐标进行校正
     if (blade_jump_count_ != 0) {
         Vector2f rotated = Rotation(-rotation_sign * BLADE_ANGLE_INTERVAL * blade_jump_count_, Vector2f(target_x, target_y));

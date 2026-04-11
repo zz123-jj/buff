@@ -1,7 +1,6 @@
 #pragma once
 
 // 预测参数
-static constexpr double DELTA_T = 0.4;              // 预测时间增量（秒）
 static constexpr double MIN_OMEGA = 1.884;          // 最小角速度
 static constexpr double FIT_START_TIME = 1.5;      // 开始拟合等待时间（秒）
 

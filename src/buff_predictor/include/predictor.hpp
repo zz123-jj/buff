@@ -34,7 +34,6 @@ class Big_Buff_Predictor {
     public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     private:
-    float expectedDeltaTime_;                         // 需要预测的时间（秒）
     MovAvg Avg_filter_;                     // 平滑滤波器
     std::vector<float> smoothed_angles_;    // 平滑后的数据
     std::vector<double> time_stamps_;       // 时间戳（秒，基于首帧对齐）
@@ -49,16 +48,14 @@ class Big_Buff_Predictor {
     Eigen::VectorXf diff_datas_;            // 原始差分数据
     Eigen::VectorXf diff_smoothed_datas_;   // 滤波后的差分数据
     public:
-     Big_Buff_Predictor(float deltaT);
+     Big_Buff_Predictor();
      Eigen::VectorXf sinFit(const Eigen::VectorXf& x, const Eigen::VectorXf& y);
     std::pair<bool, float> update(float data, double stamp_sec);  // 时间戳驱动的更新
-     static float targetFunc(float x, float A, float w, float phi, float B, float C);
      bool is_completed() const { return is_get_para_; }                                 // 是否已完成拟合
      Eigen::VectorXf get_diff_datas() const { return diff_datas_; }                     // 获取原始差分数据
      Eigen::VectorXf get_diff_smoothed_datas() const { return diff_smoothed_datas_; }   // 获取滤波后的差分数据
      Eigen::VectorXf get_sin_para() const { return sin_para_; }                         // 获取微分拟合参数 (a, ω, φ, b) dy = a * sin(ω * x + φ) + b
      Eigen::VectorXf get_cos_para() const { return cos_para_; }                         // 获取拟合参数 (A, ω, φ, B, C) y = A * cos(ω * x + φ) + B * x + C
-     float predict_future_angle(float current_angle, float pred_time_s); // 预测未来角度
      // 设置内部状态
      void set_parameters(const Eigen::VectorXf& params) { sin_para_ = params; is_get_para_ = true; }
      void set_smoothed_datas(const std::vector<float>& data) { smoothed_angles_ = data; }
@@ -71,15 +68,13 @@ public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 private:
     float window_time_;              // 窗口时间（秒）
-    float pred_delta_time_;          // 预测时间（秒）
     float angular_velocity_;         // 角速度（rad/s）
     std::vector<float> angles_;      // 角度序列
     std::vector<double> timestamps_; // 时间戳序列（秒）
 public:
-    smallPredictor(float deltaT);    // deltaT: 预测时间（秒）
+    smallPredictor();
     void reset();
     std::pair<bool, float> update(float angle, double timestamp);  // 基于时间戳更新
-    float predict_future_angle(float current_angle, float pred_time_s); // 预测未来角度
 };
 
 float euclidean_distance(cv::Point2f p1, cv::Point2f p2);
@@ -89,6 +84,7 @@ enum sizeMode{
     small
 };
 enum clockMode{
+    unknown,
     anticlockwise,
     clockwise
 };
@@ -167,6 +163,8 @@ class angleObserver{
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     private:
     clockMode mode_;
+    int direction_detect_count_ = 0;       // 检测次数
+    float total_angle_diff_ = 0.0f;        // 累计的角度变化量
     cv::Point2f last_point_;
     float last_angle_;
     int blade_jump_count_;
