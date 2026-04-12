@@ -13,6 +13,8 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <tf2/utils.h>
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <cmath>
@@ -56,10 +58,98 @@ public:
 
         if (DEBUG_MODE) {
             tracker_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>("/tracker/debug_point", 10);
+            enable_angle_log_ = this->declare_parameter<bool>("enable_angle_log", true);
+            angle_log_path_ = this->declare_parameter<std::string>("angle_log_path", "log/angle_time.csv");
+            if (enable_angle_log_) {
+                initAngleLogger();
+            }
+        }
+    }
+
+    ~BuffPredictorNode() override
+    {
+        if (angle_log_file_.is_open()) {
+            angle_log_file_.flush();
+            angle_log_file_.close();
         }
     }
 
 private:
+    void initAngleLogger()
+    {
+        try {
+            const std::filesystem::path log_path(angle_log_path_);
+            if (log_path.has_parent_path()) {
+                std::filesystem::create_directories(log_path.parent_path());
+            }
+            angle_log_file_.open(log_path, std::ios::out | std::ios::trunc);
+        } catch (const std::exception& e) {
+            RCLCPP_WARN(this->get_logger(), "Failed to create angle log file (%s): %s", angle_log_path_.c_str(), e.what());
+            enable_angle_log_ = false;
+            return;
+        }
+
+        if (!angle_log_file_.is_open()) {
+            RCLCPP_WARN(this->get_logger(), "Failed to open angle log file: %s", angle_log_path_.c_str());
+            enable_angle_log_ = false;
+            return;
+        }
+
+        angle_log_file_ << std::fixed << std::setprecision(9);
+        angle_log_file_ << "stamp_sec,time_from_start_s,continues_angle_rad,continues_angle_deg,is_tracking,fit_success,sin_a,sin_omega,sin_phi,sin_b,fit_start_time_sec\n";
+        RCLCPP_INFO(this->get_logger(), "Angle logging enabled: %s", angle_log_path_.c_str());
+    }
+
+    void logContinuousAngle(
+        const rclcpp::Time& stamp,
+        float continues_angle,
+        bool is_tracking,
+        bool fit_success,
+        const Eigen::VectorXf& sin_para,
+        double fit_start_time_sec)
+    {
+        if (!enable_angle_log_ || !angle_log_file_.is_open()) {
+            return;
+        }
+
+        if (angle_log_count_ == 0) {
+            angle_log_start_stamp_ = stamp;
+        }
+
+        const double stamp_sec = stamp.seconds();
+        const double time_from_start_s = (stamp - angle_log_start_stamp_).seconds();
+        const double angle_deg = static_cast<double>(continues_angle) * 180.0 / M_PI;
+        double sin_a = 0.0;
+        double sin_omega = 0.0;
+        double sin_phi = 0.0;
+        double sin_b = 0.0;
+
+        if (fit_success && sin_para.size() >= 4) {
+            sin_a = static_cast<double>(sin_para[0]);
+            sin_omega = static_cast<double>(sin_para[1]);
+            sin_phi = static_cast<double>(sin_para[2]);
+            sin_b = static_cast<double>(sin_para[3]);
+        }
+
+        angle_log_file_ << stamp_sec << ","
+                        << time_from_start_s << ","
+                        << continues_angle << ","
+                        << angle_deg << ","
+                        << (is_tracking ? 1 : 0) << ","
+                        << (fit_success ? 1 : 0) << ","
+                        << sin_a << ","
+                        << sin_omega << ","
+                        << sin_phi << ","
+                        << sin_b << ","
+                        << fit_start_time_sec
+                        << "\n";
+
+        ++angle_log_count_;
+        if ((angle_log_count_ % 50) == 0) {
+            angle_log_file_.flush();
+        }
+    }
+
     bool transformPointToTarget(
         const geometry_msgs::msg::PointStamped& input,
         const builtin_interfaces::msg::Time& stamp,
@@ -120,35 +210,44 @@ private:
         // 角度连续化
         float continues_angle = angle_observer_->update(vector_x, vector_y, pixel_arm_length);
         frame_count_++;
-        // 相机帧的时间戳（整数秒 + 纳秒）
         const auto stamp = rclcpp::Time(msg->header.stamp);
-        const int32_t stamp_sec_int = stamp.seconds();
-        const uint32_t stamp_nsec = static_cast<uint32_t>(stamp.nanoseconds() % 1000000000LL);
-        // 仅保留小数点前后四位：秒取后四位，纳秒取前四位
-        const int32_t stamp_sec_4 = std::abs(stamp_sec_int) % 10000;
-        const uint32_t stamp_nsec_4 = stamp_nsec / 100000; // 取纳秒前四位
-        const double stamp_sec_limited = static_cast<double>(stamp_sec_4) +
-                         static_cast<double>(stamp_nsec_4) / 10000.0;
-        // 记录连续角度与时间戳到 CSV（仅在debug模式下）
+
+        // Reset log latch when tracking is lost so next segment can log once again.
+        if (!msg->is_tracking) {
+            params_published_ = false;
+        }
+
+        //更新预测器
+        auto result = predictor_->update(continues_angle, stamp.seconds(), msg->is_tracking);
+        bool success = result.first;
+        const auto fit_sin_para = predictor_->get_sin_para();
+        const double fit_start_time_sec = success ? predictor_->get_fit_start_time_sec() : 0.0;
+
         if (DEBUG_MODE)
         {
-            static std::ofstream csv_file("log/angle_time.csv", std::ios::app);
-            static bool wrote_header = false;
-            if (csv_file.is_open())
-            {
-                if (!wrote_header)
-                {
-                    csv_file << "stamp_sec,continues_angle\n";
-                    wrote_header = true;
-                }
-                csv_file << std::setw(4) << std::setfill('0') << stamp_sec_4
-                         << "." << std::setw(4) << std::setfill('0') << stamp_nsec_4
-                         << "," << continues_angle << "\n";
-            }
+            logContinuousAngle(
+                stamp,
+                continues_angle,
+                msg->is_tracking,
+                success,
+                fit_sin_para,
+                fit_start_time_sec);
         }
-        //更新预测器
-        auto result = predictor_->update(continues_angle, stamp_sec_limited);
-        bool success = result.first;
+
+        // Print fitted sine parameters once per tracking segment when fitting succeeds.
+        if (success && !params_published_) {
+            if (fit_sin_para.size() >= 4) {
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "Fit success: dy/dt = %.6f * sin(%.6f * t + %.6f) + %.6f",
+                    static_cast<double>(fit_sin_para[0]),
+                    static_cast<double>(fit_sin_para[1]),
+                    static_cast<double>(fit_sin_para[2]),
+                    static_cast<double>(fit_sin_para[3])
+                );
+            }
+            params_published_ = true;
+        }
 
         geometry_msgs::msg::PointStamped point_odom;
         geometry_msgs::msg::PointStamped target_odom;
@@ -214,13 +313,19 @@ private:
         aiming_msg.pixel_r_center_y = msg->r_center_y;
         aiming_msg.pixel_radius = pixel_arm_length;
         if (success) {
-            const auto sin_para = predictor_->get_sin_para();
-            if (sin_para.size() >= 4) {
-                aiming_msg.sin_a = sin_para[0];
-                aiming_msg.sin_omega = sin_para[1];
-                aiming_msg.sin_phi = sin_para[2];
-                aiming_msg.sin_b = sin_para[3];
+            if (fit_sin_para.size() >= 4) {
+                aiming_msg.sin_a = fit_sin_para[0];
+                aiming_msg.sin_omega = fit_sin_para[1];
+                aiming_msg.sin_phi = fit_sin_para[2];
+                aiming_msg.sin_b = fit_sin_para[3];
             }
+            aiming_msg.fit_start_time_sec = fit_start_time_sec;
+            aiming_msg.fit_buffer_duration_sec = predictor_->get_fit_buffer_duration_sec();
+            aiming_msg.fit_data_point_count = predictor_->get_fit_data_point_count();
+        } else {
+            aiming_msg.fit_start_time_sec = 0.0;
+            aiming_msg.fit_buffer_duration_sec = 0.0f;
+            aiming_msg.fit_data_point_count = 0;
         }
         aiming_msg.target_x_3d = target_odom.point.x;
         aiming_msg.target_y_3d = target_odom.point.y;
@@ -253,6 +358,13 @@ private:
     // TF frame settings
     std::string target_frame_;
     std::string camera_frame_;
+
+    // Debug angle logging
+    bool enable_angle_log_ = false;
+    std::string angle_log_path_ = "log/angle_time.csv";
+    std::ofstream angle_log_file_;
+    rclcpp::Time angle_log_start_stamp_{0, 0, RCL_ROS_TIME};
+    std::size_t angle_log_count_ = 0;
 
     // Joint
     double current_pitch_ = 0.0;

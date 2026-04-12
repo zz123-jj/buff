@@ -20,7 +20,7 @@ enum class FanBladeState
     target,    // 目标扇叶
     unlighted, // 未点亮扇叶
     shotted,   // 已击打扇叶
-    none       // 无状态
+    unknow      // 无状态
 };
 
 enum class BuffType
@@ -85,7 +85,7 @@ std::vector<std::pair<BBox, float>> compare_by_IoU(
 struct FanBlade
 {
     BBox box;                                  // 扇叶框
-    FanBladeState state = FanBladeState::none; // 扇叶状态
+    FanBladeState state = FanBladeState::unknow; // 扇叶状态
     int id = -1;                               // 扇叶ID
 };
 
@@ -99,7 +99,7 @@ private:
     float buff_radius_ = 0.0f;                              // 能量机关半径（R标到扇叶中心的距离）
     int lighted_blade_num_ = 0;                             // 被点亮的扇叶数量
     int lost_frame_count_ = 0;                              // 目标丢失帧数
-    cv::Mat debug_frame_;                                   // 调试帧图像
+                                    // 调试帧图像
     BuffType buff_type_ = BuffType::small_buff;             // 能量机关类型
 
     bool detect_by_yolo(cv::Mat& frame);                            // 使用yolo模型获取扇叶和R标初始位置
@@ -118,5 +118,5 @@ public:
     const std::vector<FanBlade>& get_target_fan_blades() const { return target_blades_; }
     BBox get_current_R_box() const { return current_R_box_; }                // 获取当前R标框
     float get_radius() const { return buff_radius_; }                             // 获取能量机关半径
-    const cv::Mat& get_debug_frame() const { return debug_frame_; }          // 获取调试图像
+    cv::Mat debug_frame_;             // 获取调试图像
 };

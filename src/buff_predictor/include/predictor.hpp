@@ -41,7 +41,7 @@ class Big_Buff_Predictor {
     double last_time_sec_ = 0.0;            // 最近一帧时间戳（秒）
     int frame_counter_;                     // 当前帧计数
     FitStartDetect start_detector_;         // 拟合开始检测器
-    bool canStart_;                          // 是否开始拟合
+    bool canStart_;                         // 是否达到开始拟合条件
     bool is_get_para_;                      // 是否已有拟合参数
     Eigen::VectorXf sin_para_;              // 速度函数a sin ( ωt + φ ) + b
     Eigen::VectorXf cos_para_;              // 积分后的位移函数A cos(ωt + φ) + Bx + C
@@ -49,13 +49,17 @@ class Big_Buff_Predictor {
     Eigen::VectorXf diff_smoothed_datas_;   // 滤波后的差分数据
     public:
      Big_Buff_Predictor();
+     void reset();
      Eigen::VectorXf sinFit(const Eigen::VectorXf& x, const Eigen::VectorXf& y);
-    std::pair<bool, float> update(float data, double stamp_sec);  // 时间戳驱动的更新
+    std::pair<bool, float> update(float data, double stamp_sec, bool is_tracking);  // tracking 门控更新
      bool is_completed() const { return is_get_para_; }                                 // 是否已完成拟合
      Eigen::VectorXf get_diff_datas() const { return diff_datas_; }                     // 获取原始差分数据
      Eigen::VectorXf get_diff_smoothed_datas() const { return diff_smoothed_datas_; }   // 获取滤波后的差分数据
      Eigen::VectorXf get_sin_para() const { return sin_para_; }                         // 获取微分拟合参数 (a, ω, φ, b) dy = a * sin(ω * x + φ) + b
      Eigen::VectorXf get_cos_para() const { return cos_para_; }                         // 获取拟合参数 (A, ω, φ, B, C) y = A * cos(ω * x + φ) + B * x + C
+    double get_fit_start_time_sec() const { return (is_get_para_ && start_time_sec_ >= 0.0) ? start_time_sec_ : 0.0; }
+    float get_fit_buffer_duration_sec() const { return (is_get_para_ && !time_stamps_.empty()) ? static_cast<float>(time_stamps_.back()) : 0.0f; }
+    int get_fit_data_point_count() const { return is_get_para_ ? static_cast<int>(smoothed_angles_.size()) : 0; }
      // 设置内部状态
      void set_parameters(const Eigen::VectorXf& params) { sin_para_ = params; is_get_para_ = true; }
      void set_smoothed_datas(const std::vector<float>& data) { smoothed_angles_ = data; }

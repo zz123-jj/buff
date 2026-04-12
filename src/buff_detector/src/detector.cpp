@@ -228,7 +228,144 @@ void BBox::move_by(float x, float y)
     point_max_ += changed;
     point_min_ += changed;
 }
+bool BuffDetector::init(cv::Mat& frame)
+{
+   
+    /* 使用yolo模型检测初始位置
+    初始化current_R_box_和target_fan_blades_*/
+    if (!detect_by_yolo(frame))
+    {
+        return false;
+    }
 
+    // 初始化扇叶列表
+    blade_list_.clear();
+    for (size_t i = 0; i < 5; i++)
+    {
+        blade_list_.push_back(FanBlade{BBox(), FanBladeState::unlighted, static_cast<int>(i)});
+    }
+
+    // 初始化上一帧R标位置
+    last_R_box_ = current_R_box_;
+
+    // 初始化亮起扇叶数量
+    lighted_blade_num_ = 0;
+
+    // 计算能量机关半径
+    if (target_blades_.empty())
+    {
+        RCLCPP_ERROR(rclcpp::get_logger("BuffDetector"), "No target fan blade after YOLO init.");
+        return false;
+    }
+    buff_radius_ = euclidean_distance(current_R_box_.get_center_2f(), target_blades_.front().box.get_center_2f());
+
+    try
+    {
+        preprocess_image(frame);
+    }
+    catch (const cv::Exception& e)
+    {
+        RCLCPP_ERROR(rclcpp::get_logger("BuffDetector"), "OpenCV exception during image preprocessing: %s", e.what());
+        return false; // 处理异常情况，避免崩溃
+    }
+    if (!update_R_box(frame, true))
+    {
+        RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Failed to update R box during initialization");
+        return false;
+    }
+
+    return true;
+}
+
+bool BuffDetector::update(cv::Mat& frame)
+{
+    // 调试模式下保存当前帧图像
+    if (IS_DEBUG)
+    {
+        debug_frame_ = frame.clone();
+    }
+
+    // 预处理图像
+    try
+    {
+        preprocess_image(frame);
+    }
+    catch (const cv::Exception& e)
+    {
+        RCLCPP_ERROR(rclcpp::get_logger("BuffDetector"), "OpenCV exception during image preprocessing: %s", e.what());
+        return false; // 处理异常情况，避免崩溃
+    }
+
+    // 识别扇叶和R标
+    bool r_box_ok = update_R_box(frame);
+    bool fan_blades_ok = update_fan_blades(frame);
+    
+    if (r_box_ok && fan_blades_ok)
+    {
+        lost_frame_count_ = 0; // 重置丢帧计数
+    }
+    else
+    {
+        lost_frame_count_++;
+        if (IS_DEBUG && lost_frame_count_ <= 3) {
+            RCLCPP_DEBUG(rclcpp::get_logger("BuffDetector"), 
+                "Tracking failed (R_box: %s, Fan_blades: %s, lost_count: %d/%d)",
+                r_box_ok ? "OK" : "FAIL", fan_blades_ok ? "OK" : "FAIL",
+                lost_frame_count_, MAX_LOST_FRAME);
+        }
+    }
+
+    //显示调试信息
+    if (IS_DEBUG)
+    { 
+auto now = std::chrono::system_clock::now();
+auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+
+// 直接转换成字符串显示
+cv::putText(debug_frame_, 
+            std::to_string(ms), 
+            cv::Point(20, 50), 
+            cv::FONT_HERSHEY_SIMPLEX, 
+            0.8, 
+            cv::Scalar(0, 255, 0), 
+            2);                       // 线宽
+        // 显示R标框
+        cv::rectangle(
+            debug_frame_, current_R_box_.get_point_min(), current_R_box_.get_point_max(), cv::Scalar(255, 255, 0), 2
+        );
+        // 显示扇叶
+        for (const auto& fan_blade : blade_list_)
+        {
+            if (fan_blade.state == FanBladeState::unlighted)
+            {
+            cv::rectangle(
+                debug_frame_, fan_blade.box.get_point_min(), fan_blade.box.get_point_max(), cv::Scalar(0, 0, 255), 2
+            );
+        }
+            cv::putText(
+                debug_frame_,
+                "id = " + std::to_string(fan_blade.id) + " | " +
+                    (fan_blade.state == FanBladeState::target
+                         ? "target"
+                         : (fan_blade.state == FanBladeState::shotted ? "shotted" : "unlighted")),
+                fan_blade.box.get_center_2i(), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2
+            );
+        }
+    }
+
+    if (lost_frame_count_ >= MAX_LOST_FRAME)
+    {
+        if (IS_DEBUG) {
+            RCLCPP_WARN(
+                rclcpp::get_logger("BuffDetector"), "Lost target for %d consecutive frames, re-initialization required",
+                lost_frame_count_
+            );
+        }
+        return false; // 需要重新初始化
+    }
+
+    return true; // 检测成功
+}
 bool BuffDetector::detect_by_yolo(cv::Mat& frame)
 {
     // 初始化yolo检测器
@@ -351,22 +488,23 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(image, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
-    std::vector<BBox> detected_bounding_list;              // 检测到的检测框列表
-    std::vector<FanBlade> lighted_fan_blade_list; // 亮起的扇叶列表
-    lighted_fan_blade_list.clear();
+    std::vector<BBox> contour_bounding_boxes;              // 检测到的检测框列表
+    std::vector<FanBlade> lighting_blade_list; // 亮起的扇叶列表
+    lighting_blade_list.clear();
 
     // 遍历所有轮廓，筛选出可能的扇叶
     for (const auto& contour : contours)
     {
         // 将轮廓拟合为最小外接旋转矩形
-        cv::Mat rect_pts;
-        cv::boxPoints(cv::minAreaRect(contour), rect_pts);
-        RotationRectangle rotation_rect(rect_pts, current_R_box_.get_center_2f());
+        cv::Mat bounding_rect_;
+        cv::boxPoints(cv::minAreaRect(contour), bounding_rect_);
+        RotationRectangle rotation_rect(bounding_rect_, current_R_box_.get_center_2f());
 
         // 筛选条件：底部到R标距离、顶部到R标距离、面积要求
         if (0.4f * buff_radius_ < rotation_rect.get_dist_bottom(current_R_box_.get_center_2f()) &&
             rotation_rect.get_dist_top(current_R_box_.get_center_2f()) < 1.5f * buff_radius_ &&
-            rotation_rect.get_area() > 2.0f * current_R_box_.get_area())
+            rotation_rect.get_area() > 2.0f * current_R_box_.get_area()
+          )
         {
             // 将备选扇叶轮廓转换为BBox检测框
             cv::Rect rect = cv::boundingRect(contour);
@@ -374,32 +512,32 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
             {
                 cv::rectangle(debug_frame_, rect, cv::Scalar(128, 0, 128), 2);
             }
-            detected_bounding_list.push_back(BBox(
+            contour_bounding_boxes.push_back(BBox(
                 static_cast<float>(rect.x), static_cast<float>(rect.y), static_cast<float>(rect.x + rect.width),
                 static_cast<float>(rect.y + rect.height)
             ));
         }
     }
-
-    if (blade_list_[0].box.get_area() == 0 && detected_bounding_list.size() == 2)
+    //只有第一帧走以下if else
+    if (blade_list_[0].box.get_area() == 0 && contour_bounding_boxes.size() == 2)
     {
         // big buff第一帧初始化：检测到2个扇叶
         buff_type_ = BuffType::big_buff;
-        lighted_fan_blade_list.push_back(FanBlade{detected_bounding_list[0], FanBladeState::target, 0});
-        lighted_fan_blade_list.push_back(FanBlade{detected_bounding_list[1], FanBladeState::target, 1});
+        lighting_blade_list.push_back(FanBlade{contour_bounding_boxes[0], FanBladeState::target, 0});
+        lighting_blade_list.push_back(FanBlade{contour_bounding_boxes[1], FanBladeState::target, 1});
         RCLCPP_INFO(rclcpp::get_logger("BuffDetector"), "big buff initialized");
     }
-    else if (blade_list_[0].box.get_area() == 0 && detected_bounding_list.size() == 1)
+    else if (blade_list_[0].box.get_area() == 0 && contour_bounding_boxes.size() == 1)
     {
         // small buff第一帧初始化：检测到1个扇叶
         buff_type_ = BuffType::small_buff;
-        lighted_fan_blade_list.push_back(FanBlade{detected_bounding_list[0], FanBladeState::target, 0});
+        lighting_blade_list.push_back(FanBlade{contour_bounding_boxes[0], FanBladeState::target, 0});
         RCLCPP_INFO(rclcpp::get_logger("BuffDetector"), "small buff initialized");
     }
     else if (blade_list_[0].box.get_area() == 0)
     {
         // 初始化失败：检测到的扇叶数量异常
-        RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Failed to initialize fan blades");
+        RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Failed to initialize, unexpected blades)");
         return false;
     }
 
@@ -418,82 +556,83 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
         std::vector<BBox> matched_boxes; // 与该扇叶匹配的检测框列表
 
         // 计算IoU，找出属于该扇叶的所有检测框
-        for (const auto& detected_bounding : detected_bounding_list)
+        for (const auto& contour_bounding : contour_bounding_boxes)
         {
-            if (IoU(last_fan_blade.box, detected_bounding) > 0)
+            if (IoU(last_fan_blade.box, contour_bounding) > 0)
             {
-                matched_boxes.push_back(detected_bounding);
+                matched_boxes.push_back(contour_bounding);
             }
         }
         
         if (matched_boxes.size() == 1)
         {
             // 单个框：直接使用
-            lighted_fan_blade_list.push_back(FanBlade{matched_boxes[0], FanBladeState::none, last_fan_blade.id});
+            lighting_blade_list.push_back(FanBlade{matched_boxes[0], FanBladeState::unknow, last_fan_blade.id});
         }
         else if (matched_boxes.size() >= 2)
         {
             // 多个框：合并处理（镂空或非一环情况）
             BBox merged_box(matched_boxes);
-            lighted_fan_blade_list.push_back(FanBlade{merged_box, FanBladeState::none, last_fan_blade.id});
+            lighting_blade_list.push_back(FanBlade{merged_box, FanBladeState::unknow, last_fan_blade.id});
         }
     }
-
+    cv::putText(debug_frame_, "detected lighting blades: " + std::to_string(lighting_blade_list.size()), cv::Point(20, 100), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 0, 255), 2);
     // 更新已点亮扇叶状态
-    if (lighted_fan_blade_list.empty())
+    if (lighting_blade_list.empty())
     {
         if (IS_DEBUG) {
-            RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "No fan blade is lighted.");
+            RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "IOU get zero fan blade.");
         }
         return false;
     }
+    
     else if (buff_type_ == BuffType::big_buff)
     {
         // big buff：1~2个亮起视为 target，其余 unlighted；>=3个保持上一帧状态只更新框位置
-        if (lighted_fan_blade_list.size() == 1 || lighted_fan_blade_list.size() == 2)
+        if (lighting_blade_list.size() == 1 || lighting_blade_list.size() == 2)
         {
             for (size_t i = 0; i < 5; i++)
             {
                 blade_list_[i].state = FanBladeState::unlighted;
                 blade_list_[i].id = static_cast<int>(i);
             }
-            for (size_t i = 0; i < lighted_fan_blade_list.size(); ++i)
+            for (size_t i = 0; i < lighting_blade_list.size(); ++i)
             {
-                int id = lighted_fan_blade_list[i].id;
-                blade_list_[id] = lighted_fan_blade_list[i];
+                int id = lighting_blade_list[i].id;
+                blade_list_[id] = lighting_blade_list[i];
                 blade_list_[id].state = FanBladeState::target;
             }
         }
-        else if (lighted_fan_blade_list.size() >= 3)
+        else if (lighting_blade_list.size() >= 3)
         {
             if (IS_DEBUG) {
                 RCLCPP_DEBUG(rclcpp::get_logger("BuffDetector"),
-                    "Detected %zu lighted blades (>=3), keeping previous state",
-                    lighted_fan_blade_list.size());
+                    "Detected %zu lighting blades (>=3), keeping previous state",
+                    lighting_blade_list.size());
             }
-            for (auto& lighted_fan_blade : lighted_fan_blade_list)
+            for (auto& lighting_fan_blade : lighting_blade_list)
             {
-                int id = lighted_fan_blade.id;
+                int id = lighting_fan_blade.id;
                 if (id >= 0 && id < 5) {
-                    lighted_fan_blade.state = blade_list_[id].state;
-                    blade_list_[id].box = lighted_fan_blade.box;
+                    lighting_fan_blade.state = blade_list_[id].state;
+                    blade_list_[id].box = lighting_fan_blade.box;
                 }
             }
         }
         else
         {
             if (IS_DEBUG) {
-                RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Unexpected blade count: %zu", lighted_fan_blade_list.size());
+                RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Unexpected blade count: %zu", lighting_blade_list.size());
             }
             return false;
         }
     }
     else if (buff_type_ == BuffType::small_buff) 
-    {
-        if (static_cast<int>(lighted_fan_blade_list.size()) > lighted_blade_num_)
+    {   //击打后定义扇页逻辑
+        if (static_cast<int>(lighting_blade_list.size()) > lighted_blade_num_)
         {
             // 亮起个数增加：之前 unlighted 的变为 target，之前 target 的变为 shotted
-            for (auto& fan_blade : lighted_fan_blade_list)
+            for (auto& fan_blade : lighting_blade_list)
             {
                 int id = fan_blade.id;
                 if (id >= 0 && id < 5)
@@ -511,23 +650,19 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
                 }
             }
         }
-        else if (static_cast<int>(lighted_fan_blade_list.size()) == lighted_blade_num_)
-        {
+        else if (static_cast<int>(lighting_blade_list.size()) == lighted_blade_num_)
+        {   //亮起个数不变但id变了表示是未击打时的跳变
+            FanBlade last_target = target_blades_[0];
+            if(last_target.id != lighting_blade_list[0].id && lighting_blade_list.size() == 1){
+                blade_list_[last_target.id].state = FanBladeState::unlighted;
+                blade_list_[lighting_blade_list[0].id].state = FanBladeState::target; 
+             }else{
             // 亮起个数不变：保持上一帧状态，只更新框位置
-            for (const auto& fan_blade : lighted_fan_blade_list)
-            {
-                int id = fan_blade.id;
-                if (id >= 0 && id < 5)
-                {
-                    blade_list_[id].box = fan_blade.box;
-                }
-            }
-        }
-        else
-        {
-            if (IS_DEBUG) {
-                RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Unexpected blade count: %zu", lighted_fan_blade_list.size());
-            }
+            for (const auto& fan_blade : lighting_blade_list){
+                    blade_list_[fan_blade.id].box = fan_blade.box;}}}
+        else{
+             if (IS_DEBUG) {
+                RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Unexpected blade count: %zu", lighting_blade_list.size());}
             return false;
         }
     }
@@ -548,12 +683,12 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
         for (const auto& fan_blade : target_blades_)
         {
             cv::rectangle(
-                debug_frame_, fan_blade.box.get_point_min(), fan_blade.box.get_point_max(), cv::Scalar(0, 255, 0), 3);
+                debug_frame_, fan_blade.box.get_point_min(), fan_blade.box.get_point_max(), cv::Scalar(0, 255, 0), 1);
         }
     }
 
     // 更新亮起扇叶数量
-    lighted_blade_num_ = lighted_fan_blade_list.size();
+    lighted_blade_num_ = lighting_blade_list.size();
 
     // 更新未亮起扇叶状态
     if (target_blades_.empty())
@@ -634,136 +769,8 @@ bool BuffDetector::update_R_box(cv::Mat& image, bool is_init)
     return true;
 }
 
-bool BuffDetector::init(cv::Mat& frame)
-{
-    if (IS_DEBUG){
-        debug_frame_ = frame.clone();
-    }
 
-    /* 使用yolo模型检测初始位置
-    初始化current_R_box_和target_fan_blades_*/
-    if (!detect_by_yolo(frame))
-    {
-        return false;
-    }
 
-    // 初始化扇叶列表
-    blade_list_.clear();
-    for (size_t i = 0; i < 5; i++)
-    {
-        blade_list_.push_back(FanBlade{BBox(), FanBladeState::unlighted, static_cast<int>(i)});
-    }
-
-    // 初始化上一帧R标位置
-    last_R_box_ = current_R_box_;
-
-    // 初始化亮起扇叶数量
-    lighted_blade_num_ = 0;
-
-    // 计算能量机关半径
-    if (target_blades_.empty())
-    {
-        RCLCPP_ERROR(rclcpp::get_logger("BuffDetector"), "No target fan blade after YOLO init.");
-        return false;
-    }
-    buff_radius_ = euclidean_distance(current_R_box_.get_center_2f(), target_blades_.front().box.get_center_2f());
-
-    try
-    {
-        preprocess_image(frame);
-    }
-    catch (const cv::Exception& e)
-    {
-        RCLCPP_ERROR(rclcpp::get_logger("BuffDetector"), "OpenCV exception during image preprocessing: %s", e.what());
-        return false; // 处理异常情况，避免崩溃
-    }
-    if (!update_R_box(frame, true))
-    {
-        RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Failed to update R box during initialization");
-        return false;
-    }
-
-    return true;
-}
-
-bool BuffDetector::update(cv::Mat& frame)
-{
-    // 调试模式下保存当前帧图像
-    if (IS_DEBUG)
-    {
-        debug_frame_ = frame.clone();
-    }
-
-    // 预处理图像
-    try
-    {
-        preprocess_image(frame);
-    }
-    catch (const cv::Exception& e)
-    {
-        RCLCPP_ERROR(rclcpp::get_logger("BuffDetector"), "OpenCV exception during image preprocessing: %s", e.what());
-        return false; // 处理异常情况，避免崩溃
-    }
-
-    // 识别扇叶和R标
-    bool r_box_ok = update_R_box(frame);
-    bool fan_blades_ok = update_fan_blades(frame);
-    
-    if (r_box_ok && fan_blades_ok)
-    {
-        lost_frame_count_ = 0; // 重置丢帧计数
-    }
-    else
-    {
-        lost_frame_count_++;
-        if (IS_DEBUG && lost_frame_count_ <= 3) {
-            RCLCPP_DEBUG(rclcpp::get_logger("BuffDetector"), 
-                "Tracking failed (R_box: %s, Fan_blades: %s, lost_count: %d/%d)",
-                r_box_ok ? "OK" : "FAIL", fan_blades_ok ? "OK" : "FAIL",
-                lost_frame_count_, MAX_LOST_FRAME);
-        }
-    }
-
-    //显示调试信息
-    if (IS_DEBUG)
-    {
-        // 显示R标框
-        cv::rectangle(
-            debug_frame_, current_R_box_.get_point_min(), current_R_box_.get_point_max(), cv::Scalar(255, 255, 0), 2
-        );
-        // 显示扇叶
-        for (const auto& fan_blade : blade_list_)
-        {
-            if (fan_blade.state == FanBladeState::unlighted)
-            {
-            cv::rectangle(
-                debug_frame_, fan_blade.box.get_point_min(), fan_blade.box.get_point_max(), cv::Scalar(0, 0, 255), 2
-            );
-        }
-            cv::putText(
-                debug_frame_,
-                "id = " + std::to_string(fan_blade.id) + " | " +
-                    (fan_blade.state == FanBladeState::target
-                         ? "target"
-                         : (fan_blade.state == FanBladeState::shotted ? "shotted" : "unlighted")),
-                fan_blade.box.get_center_2i(), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2
-            );
-        }
-    }
-
-    if (lost_frame_count_ >= MAX_LOST_FRAME)
-    {
-        if (IS_DEBUG) {
-            RCLCPP_WARN(
-                rclcpp::get_logger("BuffDetector"), "Lost target for %d consecutive frames, re-initialization required",
-                lost_frame_count_
-            );
-        }
-        return false; // 需要重新初始化
-    }
-
-    return true; // 检测成功
-}
 
 float euclidean_distance(const cv::Point2f& p1, const cv::Point2f& p2)
 {

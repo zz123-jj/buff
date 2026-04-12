@@ -24,9 +24,8 @@ cv::VideoCapture video_capture_;
         cv::Mat frame;
         // 循环播放
         if (!video_capture_.read(frame)) {
-                RCLCPP_INFO(this->get_logger(), "Video ended, restarting...");
-                video_capture_.set(cv::CAP_PROP_POS_FRAMES, 0);  
-                video_capture_.read(frame);
+                RCLCPP_INFO(this->get_logger(), "Video ended");
+            return;
             }
         if (frame.empty()) return;
         
@@ -37,12 +36,6 @@ cv::VideoCapture video_capture_;
        
     
     }
-    
-        
-    
-    
-
-
 public:
     ImagePublisher() : Node("image_publisher")
     {

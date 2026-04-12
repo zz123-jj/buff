@@ -24,3 +24,8 @@ float32 sin_b
 float32 target_x_3d            #odom系 目标 X
 float32 target_y_3d            #odom系 目标 Y
 float32 target_z_3d            #odom系 目标 Z
+
+# 5. 拟合时间原点与窗口元数据
+float64 fit_start_time_sec      # 本次拟合片段起点的绝对时间戳（秒）
+float32 fit_buffer_duration_sec # 触发拟合时累计的数据时长（秒）
+int32   fit_data_point_count    # 触发拟合时使用的数据点数量

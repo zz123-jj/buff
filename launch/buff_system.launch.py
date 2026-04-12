@@ -23,7 +23,9 @@ def generate_launch_description():
                 'min_omega': 1.800,          # 最低角速度
                 'period_coefficient': 1.0,   # 周期系数
                 'target_frame': 'camera_optical_frame',
-                'camera_frame': 'camera_optical_frame'
+                'camera_frame': 'camera_optical_frame',
+                'enable_angle_log': True,
+                'angle_log_path': 'log/angle_time.csv'
             }]
         )
     ])

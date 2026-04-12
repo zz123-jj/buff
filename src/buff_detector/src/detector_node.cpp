@@ -15,7 +15,7 @@ public:
     {
         // 初始化检测器
         detector_ = std::make_unique<BuffDetector>();
-
+        video_img_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/image_raw", rclcpp::QoS(rclcpp::KeepLast(1)).reliable()); 
         // 订阅图像
         img_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             "/image_raw",
@@ -28,6 +28,11 @@ public:
         if (IS_DEBUG) {
             debug_image_pub_ = image_transport::create_publisher(this, "/buff_detector/debug_image");
         }
+        video_capture_.open("video/8mm_red_bright.mp4"); 
+        video_capture_.read(video_frame_);
+        auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", video_frame_).toImageMsg();
+        msg->header.stamp = this->now();
+        video_img_pub_->publish(*msg);
     }
 
 private:
@@ -61,8 +66,8 @@ private:
         // 处理第一帧
         if (!is_tracking_)
         {
-            auto frame_clone = frame.clone(); // 克隆帧以避免修改原始帧
-            if (detector_->init(frame_clone))
+            cv::Mat frame_copy = frame.clone(); // 克隆帧以供检测器使用
+            if (detector_->init(frame_copy))
             {
                 is_tracking_ = true;
                 RCLCPP_INFO(this->get_logger(), "Detector initialized.");
@@ -77,12 +82,6 @@ private:
                 is_tracking_ = false;
                 RCLCPP_WARN(this->get_logger(), "Detector lost target, re-initialization required.");
             }
-        }
-
-        cv::Mat debug_frame;
-        if constexpr (IS_DEBUG) {
-            // 获取调试图像
-            debug_frame = detector_->get_debug_frame();
         }
 
         // 获取中心点坐标
@@ -103,41 +102,38 @@ private:
         // 显示调试信息
         if constexpr (IS_DEBUG)
         {
-            // debug_frame 为空时回退显示原始帧，保证 imshow 始终有效输入
-            const cv::Mat& display_frame = debug_frame.empty() ? frame : debug_frame;
-            try
-            {
-                cv::imshow("visualization", display_frame);
-            }
-            catch (const cv::Exception& e)
-            {
-                RCLCPP_WARN(this->get_logger(), "imshow failed %s", e.what());
-            }
-            // 移到 try 外：保证无论 imshow 是否成功都会调用 waitKey
-            // 否则 imshow 抛异常时 waitKey 被跳过，导致 OpenCV 事件循环不运行，窗口不显示
-            cv::waitKey(1);
+            cv::imshow("visualization", detector_->debug_frame_);
+            cv::waitKey(-1);
             
             // 发布调试图像到 ROS Topic
-            if (!debug_frame.empty())
+            if (!detector_->debug_frame_.empty())
             {
-                auto debug_img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", debug_frame).toImageMsg();
+                auto debug_img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", detector_->debug_frame_).toImageMsg();
                 debug_img_msg->header.stamp = frame_stamp;
                 debug_img_msg->header.frame_id = "camera";
                 debug_image_pub_.publish(debug_img_msg);
             }
+          
         }
+        video_capture_.read(video_frame_);
+        auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", video_frame_).toImageMsg();
+        msg->header.stamp = this->now();
+        video_img_pub_->publish(*msg);
     }
 
     // ROS2 通信
     rclcpp::Publisher<buff_interfaces::msg::BuffTarget>::SharedPtr target_pub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr img_sub_;
-
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr video_img_pub_; 
+    
     // 检测器
     std::unique_ptr<BuffDetector> detector_;
     image_transport::Publisher debug_image_pub_;
 
     // 状态
     bool is_tracking_ = false;
+    cv::VideoCapture video_capture_;
+    cv::Mat video_frame_;
 };
 
 int main(int argc, char** argv)

@@ -6,8 +6,25 @@ Big_Buff_Predictor::Big_Buff_Predictor():
     start_detector_(1.5),                              // 使用1.5秒作为等待时间阈值
     canStart_(false),                                  // 是否开始标识位
     is_get_para_(false),                               // 是否已有拟合参数
-    sin_para_(5)                                       // 准备存储5个拟合参数: A, ω, φ, B, C
+    sin_para_(4),                                      // 准备存储4个速度函数参数: a, ω, φ, b
+    cos_para_(5)                                       // 准备存储5个位移函数参数: A, ω, φ, B, C
     {}
+
+void Big_Buff_Predictor::reset() {
+    Avg_filter_ = MovAvg(5);
+    smoothed_angles_.clear();
+    time_stamps_.clear();
+    start_time_sec_ = -1.0;
+    last_time_sec_ = 0.0;
+    frame_counter_ = 0;
+    canStart_ = false;
+    is_get_para_ = false;
+    start_detector_.reset();
+    sin_para_ = VectorXf::Zero(4);
+    cos_para_ = VectorXf::Zero(5);
+    diff_datas_.resize(0);
+    diff_smoothed_datas_.resize(0);
+}
 
 //正弦拟合函数
 VectorXf Big_Buff_Predictor::sinFit(const VectorXf& x, const VectorXf& y) {
@@ -173,7 +190,20 @@ VectorXf Big_Buff_Predictor::sinFit(const VectorXf& x, const VectorXf& y) {
 }
 
 //返回值：pair<是否成功预测, 角度增量（不再进行角度预测，此处恒返回0.0f）>
-std::pair<bool, float> Big_Buff_Predictor::update(float continues_angle, double stamp_sec) { 
+std::pair<bool, float> Big_Buff_Predictor::update(float continues_angle, double stamp_sec, bool is_tracking) {
+    // 只在 tracking 状态下采样和拟合；失跟踪则重置整个片段状态
+    if (!is_tracking) {
+        if (!smoothed_angles_.empty() || !time_stamps_.empty() || canStart_ || is_get_para_) {
+            reset();
+        }
+        return {false, 0.0f};
+    }
+
+    // 同一 tracking 片段内只拟合一次，之后复用参数
+    if (is_get_para_) {
+        return {true, 0.0f};
+    }
+
     //1.对输入数据进行平滑处理
     float smoothed_angle = Avg_filter_.update(continues_angle);
     //2.保存平滑后的数据
@@ -197,11 +227,15 @@ std::pair<bool, float> Big_Buff_Predictor::update(float continues_angle, double 
     
     //3.判断是否可以开始拟合
     if (!canStart_) {
-        canStart_ = start_detector_.update(stamp_sec, true);  // 传入时间戳和tracking状态
+        canStart_ = start_detector_.update(stamp_sec, is_tracking);  // 传入时间戳和tracking状态
     }
     
     //4.如果已经可以开始拟合，进行预测
     if (canStart_) {
+        if (smoothed_angles_.size() < 4) {
+            return {false, 0.0f};
+        }
+
         // 构造时间序列（秒）
         VectorXf time_seq(smoothed_angles_.size());
         for (size_t i = 0; i < smoothed_angles_.size(); ++i) {
@@ -210,14 +244,9 @@ std::pair<bool, float> Big_Buff_Predictor::update(float continues_angle, double 
         // 将角度数据转换为Eigen向量
         VectorXf smoothed_vector_datas = VectorXf::Map(smoothed_angles_.data(), smoothed_angles_.size());
         
-
-        sin_para_ = sinFit(time_seq, smoothed_vector_datas);  // 拟合积分形式正弦函数
+        sinFit(time_seq, smoothed_vector_datas);  // 拟合一次并缓存参数
         is_get_para_ = true;
-        
-        // 拟合成功后返回参数状态，不再计算未来角度
-        if (is_get_para_) {
-            return {true, 0.0f};
-        }
+        return {true, 0.0f};
     }
     
     // 如果还没收集够数据或还没开始拟合，返回失败
@@ -535,14 +564,10 @@ float angleObserver::update(float target_x, float target_y, float raduis) {
     return continuous_angle;
 }
 
-// ==================== Predictor3D类实现 ====================
 
-/**
- * 构造函数
- */
+
 Predictor3D::Predictor3D(const CameraParams& cam, float radius_world)
     : cam_(cam), radius_world_(radius_world) {
-    std::cout << "[Predictor3D] 初始化完成" << std::endl;
     std::cout << "  相机参数: fx=" << cam_.fx << ", fy=" << cam_.fy 
               << ", cx=" << cam_.cx << ", cy=" << cam_.cy << std::endl;
     std::cout << "  目标半径: " << radius_world_ << "m" << std::endl;
