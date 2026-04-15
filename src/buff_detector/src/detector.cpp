@@ -458,11 +458,11 @@ bool BuffDetector::preprocess_image(cv::Mat& frame)
     cv::Mat kernel(DILATE_KERNEL_SIZE, DILATE_KERNEL_SIZE, CV_8U, cv::Scalar(1));
     cv::dilate(frame, frame, kernel);
 
-    if (IS_DEBUG)
-    {
-        // 显示预处理后的图像
-        cv::imshow("preprocessed_image", frame);
-    }
+    // if (IS_DEBUG)
+    // {
+    //     // 显示预处理后的图像
+    //     cv::imshow("preprocessed_image", frame);
+    // }
 
     return true;
 }
@@ -470,7 +470,7 @@ bool BuffDetector::preprocess_image(cv::Mat& frame)
 bool BuffDetector::update_fan_blades(cv::Mat& image)
 {
     // 创建遮罩遮挡无关部分
-    const cv::Mat mask = cv::Mat::ones(image.size(), CV_8UC1);
+    cv::Mat mask = cv::Mat::ones(image.size(), CV_8UC1);
     cv::circle(
         mask, current_R_box_.get_center_2i(), static_cast<int>(buff_radius_ * OUTSIDE_SHADE_RATE), cv::Scalar(0), -1
     ); // 遮挡掉外围干扰
@@ -479,10 +479,10 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
         image, current_R_box_.get_center_2i(), static_cast<int>(buff_radius_ * INSIDE_SHADE_RATE), cv::Scalar(0), -1
     ); // 把中心R和流水灯都遮挡住
 
-    if (IS_DEBUG)
-    {
-        cv::imshow("FAN_BLADE_ROI", image);
-    }
+    // if (IS_DEBUG)
+    // {
+    //     cv::imshow("FAN_BLADE_ROI", image);
+    // }
 
     // 轮廓检测
     std::vector<std::vector<cv::Point>> contours;
@@ -634,20 +634,18 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
             // 亮起个数增加：之前 unlighted 的变为 target，之前 target 的变为 shotted
             for (auto& fan_blade : lighting_blade_list)
             {
-                int id = fan_blade.id;
-                if (id >= 0 && id < 5)
-                {
-                    if (blade_list_[id].state == FanBladeState::target)
+                
+                    if (blade_list_[fan_blade.id].state == FanBladeState::target)
                     {
                         fan_blade.state = FanBladeState::shotted;
-                        blade_list_[id] = fan_blade;
+                        blade_list_[fan_blade.id] = fan_blade;
                     }
-                    else if (blade_list_[id].state == FanBladeState::unlighted)
+                    else if (blade_list_[fan_blade.id].state == FanBladeState::unlighted)
                     {
                         fan_blade.state = FanBladeState::target;
-                        blade_list_[id] = fan_blade;
+                        blade_list_[fan_blade.id] = fan_blade;
                     }
-                }
+                
             }
         }
         else if (static_cast<int>(lighting_blade_list.size()) == lighted_blade_num_)
@@ -656,11 +654,11 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
             if(last_target.id != lighting_blade_list[0].id && lighting_blade_list.size() == 1){
                 blade_list_[last_target.id].state = FanBladeState::unlighted;
                 blade_list_[lighting_blade_list[0].id].state = FanBladeState::target; 
-             }else{
+        }else{
             // 亮起个数不变：保持上一帧状态，只更新框位置
             for (const auto& fan_blade : lighting_blade_list){
-                    blade_list_[fan_blade.id].box = fan_blade.box;}}}
-        else{
+                    blade_list_[fan_blade.id].box = fan_blade.box;}}
+                }else{
              if (IS_DEBUG) {
                 RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Unexpected blade count: %zu", lighting_blade_list.size());}
             return false;
@@ -689,6 +687,7 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
 
     // 更新亮起扇叶数量
     lighted_blade_num_ = lighting_blade_list.size();
+    max_lighted_blade_num_ = std::max(max_lighted_blade_num_, lighted_blade_num_);
 
     // 更新未亮起扇叶状态
     if (target_blades_.empty())

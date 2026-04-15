@@ -25,7 +25,7 @@ enum class FanBladeState
 
 enum class BuffType
 {
-    small_buff, // 小能量机关
+    small_buff, // 小能量机关 
     big_buff    // 大能量机关
 };
 
@@ -97,7 +97,8 @@ private:
     std::vector<FanBlade> target_blades_;                   // 目标扇叶列表
     std::vector<FanBlade> blade_list_;                      // 所有扇叶框
     float buff_radius_ = 0.0f;                              // 能量机关半径（R标到扇叶中心的距离）
-    int lighted_blade_num_ = 0;                             // 被点亮的扇叶数量
+    int lighted_blade_num_ = 0;                             // 亮起的扇叶数量
+                            // 记录亮起过的最大扇叶数量，用于判断是否结束
     int lost_frame_count_ = 0;                              // 目标丢失帧数
                                     // 调试帧图像
     BuffType buff_type_ = BuffType::small_buff;             // 能量机关类型
@@ -119,4 +120,6 @@ public:
     BBox get_current_R_box() const { return current_R_box_; }                // 获取当前R标框
     float get_radius() const { return buff_radius_; }                             // 获取能量机关半径
     cv::Mat debug_frame_;             // 获取调试图像
+    int max_lighted_blade_num_ = 0; 
+    BuffType get_buff_type() const { return buff_type_; } // 获取当前buff模式
 };

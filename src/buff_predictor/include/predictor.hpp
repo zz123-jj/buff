@@ -13,36 +13,21 @@
 using namespace Eigen;
 //拟合开始检测器
 //根据用户设定的时间阈值和时间戳来判断是否可以开始拟合
-class FitStartDetect {
-private:
-    double required_time_;      // 用户设定的时间阈值（秒）
-    double first_timestamp_;    // 第一次tracking的时间戳（秒）
-    bool has_first_stamp_;      // 是否已记录第一次时间戳
-public:
-    // required_time: 用户设定的时间（秒），默认1.5秒
-    FitStartDetect(double required_time = 1.5);
-    // 更新时间戳，判断是否可以开始拟合
-    // current_timestamp: 当前时间戳（秒）
-    // is_tracking: 是否处于tracking状态
-    bool update(double current_timestamp, bool is_tracking);
-    // 重置检测器
-    void reset();
-};
-
-
 class Big_Buff_Predictor {
     public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+        std::vector<std::pair<double,float>> time_w_pairs_;  //时间角速度对 
+
     private:
     MovAvg Avg_filter_;                     // 平滑滤波器
-    std::vector<float> smoothed_angles_;    // 平滑后的数据
-    std::vector<double> time_stamps_;       // 时间戳（秒，基于首帧对齐）
-    double start_time_sec_ = -1.0;          // 首帧时间戳（秒）
+    double start_time_ = -1.0;               // 首帧时间戳（秒）
     double last_time_sec_ = 0.0;            // 最近一帧时间戳（秒）
-    int frame_counter_;                     // 当前帧计数
-    FitStartDetect start_detector_;         // 拟合开始检测器
-    bool canStart_;                         // 是否达到开始拟合条件
-    bool is_get_para_;                      // 是否已有拟合参数
+    int frame_counter_;  
+                       // 当前帧计数
+    bool is_get_para_; 
+    std::vector<float> smoothed_angles_;
+        // 平滑后的角度数据
+    std::vector<double> time_stamps_;
     Eigen::VectorXf sin_para_;              // 速度函数a sin ( ωt + φ ) + b
     Eigen::VectorXf cos_para_;              // 积分后的位移函数A cos(ωt + φ) + Bx + C
     Eigen::VectorXf diff_datas_;            // 原始差分数据
@@ -57,12 +42,12 @@ class Big_Buff_Predictor {
      Eigen::VectorXf get_diff_smoothed_datas() const { return diff_smoothed_datas_; }   // 获取滤波后的差分数据
      Eigen::VectorXf get_sin_para() const { return sin_para_; }                         // 获取微分拟合参数 (a, ω, φ, b) dy = a * sin(ω * x + φ) + b
      Eigen::VectorXf get_cos_para() const { return cos_para_; }                         // 获取拟合参数 (A, ω, φ, B, C) y = A * cos(ω * x + φ) + B * x + C
-    double get_fit_start_time_sec() const { return (is_get_para_ && start_time_sec_ >= 0.0) ? start_time_sec_ : 0.0; }
-    float get_fit_buffer_duration_sec() const { return (is_get_para_ && !time_stamps_.empty()) ? static_cast<float>(time_stamps_.back()) : 0.0f; }
-    int get_fit_data_point_count() const { return is_get_para_ ? static_cast<int>(smoothed_angles_.size()) : 0; }
+    double get_fit_start_time() const { return (start_time_ >= 0.0) ? start_time_ : -1.0; }
+    float get_fit_buffer_duration_sec() const { return (is_get_para_ && !time_w_pairs_.empty()) ? static_cast<float>(time_w_pairs_.back().first) : 0.0f; }
+    int get_fit_data_point_count() const { return is_get_para_ ? static_cast<int>(time_w_pairs_.size()) : 0; }
      // 设置内部状态
      void set_parameters(const Eigen::VectorXf& params) { sin_para_ = params; is_get_para_ = true; }
-     void set_smoothed_datas(const std::vector<float>& data) { smoothed_angles_ = data; }
+
      void set_frame_counter(int counter) { frame_counter_ = counter; }
     };
 
@@ -170,12 +155,14 @@ class angleObserver{
     int direction_detect_count_ = 0;       // 检测次数
     float total_angle_diff_ = 0.0f;        // 累计的角度变化量
     cv::Point2f last_point_;
-    float last_angle_;
     int blade_jump_count_;
     bool is_first_angle_;
     public:
+        float last_angle_;
+
     angleObserver(clockMode mode);
     Vector2f Rotation(float theta, Vector2f vector);
     float AngleTransformer(float x, float y);
+    clockMode getClockMode() const;
     float update(float target_x, float target_y, float radius);
 };

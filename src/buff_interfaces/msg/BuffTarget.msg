@@ -2,7 +2,7 @@
 
 std_msgs/Header header
 float32 radius              # 旋转半径
-
+bool buff_type               #0=small buff 1=bigbuff
 bool is_tracking            # 是否在跟踪
 
 float32 target_center_x     # 扇叶框中心x坐标

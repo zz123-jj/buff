@@ -3,27 +3,20 @@
 Big_Buff_Predictor::Big_Buff_Predictor():
     Avg_filter_(5),                                    // 创建平滑滤波器
     frame_counter_(0),                                 // 当前帧计数
-    start_detector_(1.5),                              // 使用1.5秒作为等待时间阈值
-    canStart_(false),                                  // 是否开始标识位
+                    
     is_get_para_(false),                               // 是否已有拟合参数
-    sin_para_(4),                                      // 准备存储4个速度函数参数: a, ω, φ, b
-    cos_para_(5)                                       // 准备存储5个位移函数参数: A, ω, φ, B, C
-    {}
+    sin_para_(4)                                     
+   {}
 
 void Big_Buff_Predictor::reset() {
     Avg_filter_ = MovAvg(5);
     smoothed_angles_.clear();
     time_stamps_.clear();
-    start_time_sec_ = -1.0;
+    start_time_ = -1.0;
     last_time_sec_ = 0.0;
-    frame_counter_ = 0;
-    canStart_ = false;
-    is_get_para_ = false;
-    start_detector_.reset();
     sin_para_ = VectorXf::Zero(4);
     cos_para_ = VectorXf::Zero(5);
-    diff_datas_.resize(0);
-    diff_smoothed_datas_.resize(0);
+
 }
 
 //正弦拟合函数
@@ -190,68 +183,60 @@ VectorXf Big_Buff_Predictor::sinFit(const VectorXf& x, const VectorXf& y) {
 }
 
 //返回值：pair<是否成功预测, 角度增量（不再进行角度预测，此处恒返回0.0f）>
-std::pair<bool, float> Big_Buff_Predictor::update(float continues_angle, double stamp_sec, bool is_tracking) {
-    // 只在 tracking 状态下采样和拟合；失跟踪则重置整个片段状态
-    if (!is_tracking) {
-        if (!smoothed_angles_.empty() || !time_stamps_.empty() || canStart_ || is_get_para_) {
-            reset();
-        }
-        return {false, 0.0f};
-    }
+// std::pair<bool, float> Big_Buff_Predictor::update(float continues_angle, double stamp_sec, bool is_tracking) {
+//     // 只在 tracking 状态下采样和拟合；失跟踪则重置整个片段状态
+//     if (!is_tracking) {
+//         if (!smoothed_angles_.empty() || !time_stamps_.empty() ||) {
+//             reset();
+//         }
+//         return {false, 0.0f};
+//     }
 
-    // 同一 tracking 片段内只拟合一次，之后复用参数
-    if (is_get_para_) {
-        return {true, 0.0f};
-    }
+//     // 同一 tracking 片段内只拟合一次，之后复用参数
+//     if (is_get_para_) {
+//         return {true, 0.0f};
+//     }
 
-    //1.对输入数据进行平滑处理
-    float smoothed_angle = Avg_filter_.update(continues_angle);
-    //2.保存平滑后的数据
-    smoothed_angles_.push_back(smoothed_angle);
-    frame_counter_++;  // 帧计数器加1
+//     //1.对输入数据进行平滑处理
+//     float smoothed_angle = Avg_filter_.update(continues_angle);
+//     //2.保存平滑后的数据
+//     smoothed_angles_.push_back(smoothed_angle);
+//     frame_counter_++;  // 帧计数器加1
 
-    if (start_time_sec_ < 0.0) {
-        start_time_sec_ = stamp_sec;
-    }
-    double t = stamp_sec - start_time_sec_;
+//     if (start_time_ < 0.0) {
+//         start_time_ = stamp_sec;
+//     }
+//     double t = stamp_sec - start_time_;
 
-    // Protect against non-increasing timestamps to avoid zero/negative dt.
-    if (!time_stamps_.empty() && t <= time_stamps_.back() + 1e-6) {
-        smoothed_angles_.pop_back();
-        frame_counter_--;
-        return {false, 0.0f};
-    }
+//     // Protect against non-increasing timestamps to avoid zero/negative dt.
+//     if (!time_stamps_.empty() && t <= time_stamps_.back() + 1e-6) {
+//         smoothed_angles_.pop_back();
+//         frame_counter_--;
+//         return {false, 0.0f};
+//     }
 
-    last_time_sec_ = stamp_sec;
-    time_stamps_.push_back(t);
+//     last_time_sec_ = stamp_sec;
+//     time_stamps_.push_back(t);
     
-    //3.判断是否可以开始拟合
-    if (!canStart_) {
-        canStart_ = start_detector_.update(stamp_sec, is_tracking);  // 传入时间戳和tracking状态
-    }
+ 
     
-    //4.如果已经可以开始拟合，进行预测
-    if (canStart_) {
-        if (smoothed_angles_.size() < 4) {
-            return {false, 0.0f};
-        }
-
-        // 构造时间序列（秒）
-        VectorXf time_seq(smoothed_angles_.size());
-        for (size_t i = 0; i < smoothed_angles_.size(); ++i) {
-            time_seq[i] = static_cast<float>(time_stamps_[i]);
-        }
-        // 将角度数据转换为Eigen向量
-        VectorXf smoothed_vector_datas = VectorXf::Map(smoothed_angles_.data(), smoothed_angles_.size());
+    
+//         // 构造时间序列（秒）
+//         VectorXf time_seq(smoothed_angles_.size());
+//         for (size_t i = 0; i < smoothed_angles_.size(); ++i) {
+//             time_seq[i] = static_cast<float>(time_stamps_[i]);
+//         }
+//         // 将角度数据转换为Eigen向量
+//         VectorXf smoothed_vector_datas = VectorXf::Map(smoothed_angles_.data(), smoothed_angles_.size());
         
-        sinFit(time_seq, smoothed_vector_datas);  // 拟合一次并缓存参数
-        is_get_para_ = true;
-        return {true, 0.0f};
-    }
+//         sinFit(time_seq, smoothed_vector_datas);  // 拟合一次并缓存参数
+//         is_get_para_ = true;
+//         return {true, 0.0f};
+//     }
     
-    // 如果还没收集够数据或还没开始拟合，返回失败
-    return {false, 0.0f};
-}
+//     // 如果还没收集够数据或还没开始拟合，返回失败
+//     return {false, 0.0f};
+// }
 
 smallPredictor::smallPredictor()
     : window_time_(1.5f),           // 窗口时间：1.5秒用于计算角速度
@@ -347,50 +332,7 @@ std::pair<bool, float> smallPredictor::update(float angle, double timestamp) {
 }
 
 
-//收集足够的数据点后开始拟合
-// fps: 相机帧率(fps)
-// required_time: 用户设定的时间阈值（秒），默认1.5秒
-FitStartDetect::FitStartDetect(double required_time):
-    required_time_(required_time),
-    first_timestamp_(-1.0),
-    has_first_stamp_(false)
-{
-}
 
-// 更新时间戳，判断是否可以开始拟合
-// current_timestamp: 当前时间戳（秒）
-// is_tracking: 是否处于tracking状态
-// 返回true表示已经达到时间阈值，可以开始拟合
-bool FitStartDetect::update(double current_timestamp, bool is_tracking) {
-    // 如果不在tracking，重置状态
-    if (!is_tracking) {
-        reset();
-        return false;
-    }
-    
-    // 如果是第一次tracking，记录时间戳
-    if (!has_first_stamp_) {
-        first_timestamp_ = current_timestamp;
-        has_first_stamp_ = true;
-        return false;
-    }
-    
-    // 计算时间差
-    double elapsed_time = current_timestamp - first_timestamp_;
-    
-    // 判断是否达到时间阈值
-    if (elapsed_time >= required_time_) {
-        return true;
-    }
-    
-    return false;
-}
-
-// 重置检测器
-void FitStartDetect::reset() {
-    first_timestamp_ = -1.0;
-    has_first_stamp_ = false;
-}
 
 //两点之间的欧氏距离
 float euclidean_distance(cv::Point2f p1, cv::Point2f p2){
@@ -476,6 +418,10 @@ float angleObserver::AngleTransformer(float x, float y) {
     return continuous_angle;
 }
 
+clockMode angleObserver::getClockMode() const {
+    return mode_;
+}
+
 //x, y: 目标的当前坐标（相对于旋转中心）raduis: 旋转半径
 //检查是否发生72度倍数的跳变 如果跳变则反向旋转坐标进行校正
 //返回连续化后的角度（弧度）
@@ -504,9 +450,9 @@ float angleObserver::update(float target_x, float target_y, float raduis) {
             // 累计采集到 5~10 帧数据后，再做出判断
             if (direction_detect_count_ > 5) { 
                 if (total_angle_diff_ > 0) {
-                    mode_ = clockMode::anticlockwise; // 角度变大，逆时针
-                } else {
-                    mode_ = clockMode::clockwise;     // 角度变小，顺时针
+                    mode_ = clockMode::anticlockwise; // 角度差和为正，认为是逆时针旋转
+                } else if(total_angle_diff_ < 0){
+                    mode_ = clockMode::clockwise;     // 角度差和为负，认为是顺时针旋转
                 }
             }
             
@@ -586,38 +532,5 @@ float Predictor3D::compute_depth(float radius_pixel) const {
     return (radius_world_ * cam_.fx) / radius_pixel;
 }
 
-/**
- * 像素坐标转相机坐标系3D点
- * 使用针孔相机模型的反投影公式
- */
-Point3D Predictor3D::pixel_to_3d(float u, float v, float depth) const {
-    Point3D p;
-    p.z = depth;
-    // 针孔相机模型反投影：
-    // X = (u - cx) * Z / fx
-    // Y = (v - cy) * Z / fy
-    p.x = (u - cam_.cx) * depth / cam_.fx;
-    p.y = (v - cam_.cy) * depth / cam_.fy;
-    return p;
-}
 
-/**
- * 预测未来3D位置
- */
-Point3D Predictor3D::predict_3d_position(float current_angle, float angle_increment,
-                                         float center_u, float center_v,
-                                         float radius_pixel) const {
-    // 1. 计算预测角度（当前角度 + 增量）
-    float predicted_angle = current_angle + angle_increment;
-    
-    // 2. 根据预测角度计算目标的像素坐标
-    // 假设旋转中心为(center_u, center_v)，半径为radius_pixel
-    float pred_u = center_u + radius_pixel * std::cos(predicted_angle);
-    float pred_v = center_v + radius_pixel * std::sin(predicted_angle);
-    
-    // 3. 通过已知半径计算深度
-    float depth = compute_depth(radius_pixel);
-    
-    // 4. 将像素坐标和深度转换为相机坐标系3D点
-    return pixel_to_3d(pred_u, pred_v, depth);
-}
+
