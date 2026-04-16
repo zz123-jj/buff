@@ -4,6 +4,7 @@ std_msgs/Header header
 bool    is_tracking       # 是否拟合成功
 int32   frame_number      # 帧号
 uint8   spin_direction    # 旋转方向: 0=unknown, 1=anticlockwise(逆时针), 2=clockwise(顺时针)
+bool buff_type               #0=small buff 1=bigbuff
 
 # 2. 3D 坐标 (明确这是 R 标圆心)
 float64 r_center_x_3d        # odom系 R标 X

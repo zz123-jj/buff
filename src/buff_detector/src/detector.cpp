@@ -1,5 +1,4 @@
 #include "buff_detector/detector.hpp"
-#include "buff_detector/config.hpp"
 #include "buff_detector/yolo_inference.hpp"
 
 #include <iostream>
@@ -280,7 +279,7 @@ bool BuffDetector::init(cv::Mat& frame)
 bool BuffDetector::update(cv::Mat& frame)
 {
     // 调试模式下保存当前帧图像
-    if (IS_DEBUG)
+    if (config_.debug_mode)
     {
         debug_frame_ = frame.clone();
     }
@@ -307,16 +306,16 @@ bool BuffDetector::update(cv::Mat& frame)
     else
     {
         lost_frame_count_++;
-        if (IS_DEBUG && lost_frame_count_ <= 3) {
+        if (config_.debug_mode && lost_frame_count_ <= 3) {
             RCLCPP_DEBUG(rclcpp::get_logger("BuffDetector"), 
                 "Tracking failed (R_box: %s, Fan_blades: %s, lost_count: %d/%d)",
                 r_box_ok ? "OK" : "FAIL", fan_blades_ok ? "OK" : "FAIL",
-                lost_frame_count_, MAX_LOST_FRAME);
+                lost_frame_count_, config_.max_lost_frame);
         }
     }
 
     //显示调试信息
-    if (IS_DEBUG)
+    if (config_.debug_mode)
     { 
 auto now = std::chrono::system_clock::now();
 auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
@@ -353,9 +352,9 @@ cv::putText(debug_frame_,
         }
     }
 
-    if (lost_frame_count_ >= MAX_LOST_FRAME)
+    if (lost_frame_count_ >= config_.max_lost_frame)
     {
-        if (IS_DEBUG) {
+        if (config_.debug_mode) {
             RCLCPP_WARN(
                 rclcpp::get_logger("BuffDetector"), "Lost target for %d consecutive frames, re-initialization required",
                 lost_frame_count_
@@ -376,9 +375,9 @@ bool BuffDetector::detect_by_yolo(cv::Mat& frame)
         // yolo参数
         DL_INIT_PARAM yolo_param;
         yolo_detector.classes = {"fan_blade", "R"};
-        yolo_param.rectConfidenceThreshold = CONFIDENCE_THRESHOLD;
-        yolo_param.iouThreshold = IOU_THRESHOLD;
-        yolo_param.modelPath = MODEL_PATH;
+        yolo_param.rectConfidenceThreshold = config_.confidence_threshold;
+        yolo_param.iouThreshold = config_.iou_threshold;
+        yolo_param.modelPath = config_.model_path;
         yolo_param.imgSize = {480, 640}; // 模型期望的输入尺寸 {height, width}
         yolo_param.modelType = YOLO_DETECT_V8;
         yolo_param.cudaEnable = false;
@@ -437,7 +436,7 @@ bool BuffDetector::detect_by_yolo(cv::Mat& frame)
     }
     else
     {
-        if (IS_DEBUG) {
+        if (config_.debug_mode) {
             RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), 
                 "YOLO init failed (got %zu fans, %zu Rs)",
                 fan_detections.size(), R_detections.size());
@@ -452,10 +451,10 @@ bool BuffDetector::preprocess_image(cv::Mat& frame)
     cv::cvtColor(frame, frame, cv::COLOR_BGR2HSV);
 
     // 根据阈值范围进行二值化
-    cv::inRange(frame, LOWER_HSV, UPPER_HSV, frame);
+    cv::inRange(frame, config_.lower_hsv, config_.upper_hsv, frame);
 
     // 膨胀操作
-    cv::Mat kernel(DILATE_KERNEL_SIZE, DILATE_KERNEL_SIZE, CV_8U, cv::Scalar(1));
+    cv::Mat kernel(config_.dilate_kernel_size, config_.dilate_kernel_size, CV_8U, cv::Scalar(1));
     cv::dilate(frame, frame, kernel);
 
     // if (IS_DEBUG)
@@ -472,11 +471,19 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
     // 创建遮罩遮挡无关部分
     cv::Mat mask = cv::Mat::ones(image.size(), CV_8UC1);
     cv::circle(
-        mask, current_R_box_.get_center_2i(), static_cast<int>(buff_radius_ * OUTSIDE_SHADE_RATE), cv::Scalar(0), -1
+        mask,
+        current_R_box_.get_center_2i(),
+        static_cast<int>(buff_radius_ * config_.outside_shade_rate),
+        cv::Scalar(0),
+        -1
     ); // 遮挡掉外围干扰
     image.setTo(0, mask);
     cv::circle(
-        image, current_R_box_.get_center_2i(), static_cast<int>(buff_radius_ * INSIDE_SHADE_RATE), cv::Scalar(0), -1
+        image,
+        current_R_box_.get_center_2i(),
+        static_cast<int>(buff_radius_ * config_.inside_shade_rate),
+        cv::Scalar(0),
+        -1
     ); // 把中心R和流水灯都遮挡住
 
     // if (IS_DEBUG)
@@ -508,7 +515,7 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
         {
             // 将备选扇叶轮廓转换为BBox检测框
             cv::Rect rect = cv::boundingRect(contour);
-            if (IS_DEBUG)
+            if (config_.debug_mode)
             {
                 cv::rectangle(debug_frame_, rect, cv::Scalar(128, 0, 128), 2);
             }
@@ -580,7 +587,7 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
     // 更新已点亮扇叶状态
     if (lighting_blade_list.empty())
     {
-        if (IS_DEBUG) {
+        if (config_.debug_mode) {
             RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "IOU get zero fan blade.");
         }
         return false;
@@ -605,7 +612,7 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
         }
         else if (lighting_blade_list.size() >= 3)
         {
-            if (IS_DEBUG) {
+            if (config_.debug_mode) {
                 RCLCPP_DEBUG(rclcpp::get_logger("BuffDetector"),
                     "Detected %zu lighting blades (>=3), keeping previous state",
                     lighting_blade_list.size());
@@ -621,7 +628,7 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
         }
         else
         {
-            if (IS_DEBUG) {
+            if (config_.debug_mode) {
                 RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Unexpected blade count: %zu", lighting_blade_list.size());
             }
             return false;
@@ -659,7 +666,7 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
             for (const auto& fan_blade : lighting_blade_list){
                     blade_list_[fan_blade.id].box = fan_blade.box;}}
                 }else{
-             if (IS_DEBUG) {
+             if (config_.debug_mode) {
                 RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Unexpected blade count: %zu", lighting_blade_list.size());}
             return false;
         }
@@ -675,7 +682,7 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
         }
     }
 
-    if (IS_DEBUG)
+    if (config_.debug_mode)
     {
         // 绘制所有 target 扇叶
         for (const auto& fan_blade : target_blades_)

@@ -15,6 +15,7 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>eigen</depend>
+  <depend>ceres-solver</depend>
   <depend>buff_interfaces</depend>
   <depend>tf2_ros</depend>
 

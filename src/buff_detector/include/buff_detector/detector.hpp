@@ -1,6 +1,21 @@
 #pragma once
 
 #include <opencv2/opencv.hpp>
+#include <string>
+
+struct BuffDetectorConfig
+{
+    std::string model_path = "src/buff_detector/model/Fan.onnx";
+    float confidence_threshold = 0.5f;
+    float iou_threshold = 0.5f;
+    bool debug_mode = true;
+    float inside_shade_rate = 0.7f;
+    float outside_shade_rate = 1.39f;
+    cv::Scalar lower_hsv = cv::Scalar(0, 40, 220);
+    cv::Scalar upper_hsv = cv::Scalar(70, 255, 255);
+    int dilate_kernel_size = 7;
+    int max_lost_frame = 5;
+};
 
 float euclidean_distance(const cv::Point2f& p1, const cv::Point2f& p2); // 计算两点间的欧氏距离
 cv::Point2f rotate_point(
@@ -102,6 +117,7 @@ private:
     int lost_frame_count_ = 0;                              // 目标丢失帧数
                                     // 调试帧图像
     BuffType buff_type_ = BuffType::small_buff;             // 能量机关类型
+    BuffDetectorConfig config_;
 
     bool detect_by_yolo(cv::Mat& frame);                            // 使用yolo模型获取扇叶和R标初始位置
     bool preprocess_image(cv::Mat& frame);                          // 获取预处理后的二值图
@@ -111,6 +127,7 @@ private:
 
 public:
     BuffDetector() = default;
+    void set_config(const BuffDetectorConfig& config) { config_ = config; }
 
     bool init(cv::Mat& frame);                                               // 初始化检测器
     bool update(cv::Mat& frame);                                             // 更新检测结果
