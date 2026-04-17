@@ -68,8 +68,7 @@ public:
         if (detector_config_.debug_mode) {
             debug_image_pub_ = image_transport::create_publisher(this, "/buff_detector/debug_image");
         }
-        //video_capture_.open("video/8mm_red_bright.mp4"); 
-        //sendVedioImage(video_frame_);
+       
     }
 
 private:
@@ -128,15 +127,16 @@ private:
         cv::Point2f r_center = detector_->get_current_R_box().get_center_2f();
      // 发布目标信息
         auto target_msg = buff_interfaces::msg::BuffTarget();
-        target_msg.header.stamp = frame_stamp;
-        target_msg.buff_type = static_cast<uint8_t>(detector_->get_buff_type()); // 获取当前buff模式
-        target_msg.radius = detector_->get_radius(); // 获取能量机关半径
+        target_msg.is_tracking = is_tracking_;
+        if(!is_tracking_){set_defaultBuffTarget(target_msg);}
+        else{target_msg.header.stamp = frame_stamp;
+        target_msg.is_bigbuff = static_cast<uint8_t>(detector_->get_buff_type()); // 获取当前buff模式
+        target_msg.spin_direction = detector_->get_spin_direction();
         target_msg.target_center_x = fan_center.x;
         target_msg.target_center_y = fan_center.y;
         target_msg.r_center_x = r_center.x;
         target_msg.r_center_y = r_center.y;
-        target_msg.is_tracking = is_tracking_;
-        target_msg.spin_direction = detector_->get_spin_direction();
+        target_msg.radius = detector_->get_radius();} // 获取能量机关半径
         target_pub_->publish(target_msg);
         }
         // 显示调试信息
@@ -157,17 +157,20 @@ private:
         }
        
     }
-    // void sendVedioImage(cv::Mat frame){
-    //  video_capture_.read(frame);
-    //     auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8",frame).toImageMsg();
-    //     msg->header.stamp = this->now();
-    //     video_img_pub_->publish(*msg);}
 
+    void set_defaultBuffTarget(buff_interfaces::msg::BuffTarget &msg) {
+        msg.is_bigbuff = -10;
+        msg.spin_direction = -10;
+        msg.target_center_x = -10.0f;
+        msg.target_center_y = -10.0f;
+        msg.r_center_x = -10.0f;
+        msg.r_center_y = -10.0f;
+        msg.radius = -10.0f;
+       }
+  
     // ROS2 通信
     rclcpp::Publisher<buff_interfaces::msg::BuffTarget>::SharedPtr target_pub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr img_sub_;
-    //rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr video_img_pub_; 
-    
     // 检测器
     std::unique_ptr<BuffDetector> detector_;
     // 配置
@@ -177,10 +180,7 @@ private:
     
     std::string debug_image_frame_id_ = "camera";    
 
-  // 状态
     bool is_tracking_ = false;
- 
-   // cv::VideoCapture video_capture_;
     cv::Mat video_frame_;
 };
 

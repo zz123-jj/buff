@@ -157,11 +157,11 @@ private:
         aiming_msg.pixel_r_center_x = msg->r_center_x;
         aiming_msg.pixel_r_center_y = msg->r_center_y;
         aiming_msg.pixel_radius = msg->radius;
-        aiming_msg.buff_type = msg->buff_type;
+        aiming_msg.buff_type = msg->is_bigbuff;
         aiming_msg.is_tracking = msg->is_tracking;
 
 
-        const bool is_big_buff = msg->buff_type;
+        const bool is_big_buff = msg->is_bigbuff;
 
         if (!msg->is_tracking) {
             predictor_->reset();

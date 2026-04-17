@@ -117,7 +117,7 @@ private:
     int lighted_blade_num_ = 0;                             // 亮起的扇叶数量
                             // 记录亮起过的最大扇叶数量，用于判断是否结束
     int lost_frame_count_ = 0;                              // 目标丢失帧数
-    uint8_t spin_direction_ = 0;                            // 旋转方向: 0=unknown, 1=anticlockwise, 2=clockwise
+    uint8_t spin_direction_ = 0;                            // 旋转方向: 0=unknown, -1=人眼anticlockwise, 1=人眼clockwise
     uint8_t pending_spin_direction_ = 0;                    // 候选方向
     int pending_direction_count_ = 0;                       // 候选方向连续计数
     int direction_confirm_frames_ = 3;                      // 连续确认帧数（稳定优先）

@@ -776,7 +776,7 @@ void BuffDetector::update_spin_direction_by_target_id()
         return;
     }
 
-    const uint8_t candidate_direction = angle_diff > 0.0f ? 1 : 2;
+    const uint8_t candidate_direction = angle_diff > 0.0f ? 1 : -1;
 
     if (candidate_direction == pending_spin_direction_) {
         ++pending_direction_count_;
