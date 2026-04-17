@@ -63,10 +63,10 @@ public:
             [this](const sensor_msgs::msg::Image::SharedPtr msg) { imageCallback(msg); });
 
         // 发布目标信息
-        target_pub_ = this->create_publisher<buff_interfaces::msg::BuffTarget>("/buff_target", 10);
+        target_pub_ = this->create_publisher<buff_interfaces::msg::BuffTarget>("/buff/target", 10);
 
         if (detector_config_.debug_mode) {
-            debug_image_pub_ = image_transport::create_publisher(this, "/buff_detector/debug_image");
+            debug_image_pub_ = image_transport::create_publisher(this, "/buff/debug_image");
         }
        
     }
@@ -130,7 +130,7 @@ private:
         target_msg.is_tracking = is_tracking_;
         if(!is_tracking_){set_defaultBuffTarget(target_msg);}
         else{target_msg.header.stamp = frame_stamp;
-        target_msg.is_bigbuff = static_cast<uint8_t>(detector_->get_buff_type()); // 获取当前buff模式
+        target_msg.is_bigbuff = (detector_->get_buff_type() == BuffType::big_buff ? 1 : -1); // 获取当前buff模式
         target_msg.spin_direction = detector_->get_spin_direction();
         target_msg.target_center_x = fan_center.x;
         target_msg.target_center_y = fan_center.y;
@@ -159,13 +159,13 @@ private:
     }
 
     void set_defaultBuffTarget(buff_interfaces::msg::BuffTarget &msg) {
-        msg.is_bigbuff = -10;
-        msg.spin_direction = -10;
-        msg.target_center_x = -10.0f;
-        msg.target_center_y = -10.0f;
-        msg.r_center_x = -10.0f;
-        msg.r_center_y = -10.0f;
-        msg.radius = -10.0f;
+        msg.is_bigbuff = 0;
+        msg.spin_direction = 0;
+        msg.target_center_x = 0.0f;
+        msg.target_center_y = 0.0f;
+        msg.r_center_x = 0.0f;
+        msg.r_center_y = 0.0f;
+        msg.radius = 0.0f;
        }
   
     // ROS2 通信

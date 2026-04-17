@@ -226,8 +226,7 @@ float angleObserver::update(float target_x, float target_y, float raduis) {
     }
 
     // 根据旋转方向确定旋转角度的符号
-    // 逆时针：正角度；顺时针：负角度
-    float rotation_sign = (mode_ == anticlockwise) ? 1.0f : -1.0f;
+    float rotation_sign = (mode_ == anticlockwise) ? -1.0f : 1.0f;
 
     // 步骤2：如果之前发生过装甲板跳变，需要先对当前坐标进行校正
     if (blade_jump_count_ != 0) {

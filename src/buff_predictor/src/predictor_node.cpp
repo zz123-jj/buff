@@ -83,7 +83,7 @@ public:
 
     
         target_sub_ = this->create_subscription<buff_interfaces::msg::BuffTarget>(
-            "/buff_target", 10,
+            "/buff/target", 10,
             [this](const buff_interfaces::msg::BuffTarget::SharedPtr msg) { targetCallback(msg); });
 
         aiming_pub_ = this->create_publisher<buff_interfaces::msg::BuffAimingData>(
@@ -152,38 +152,33 @@ private:
         buff_interfaces::msg::BuffAimingData aiming_msg;
         aiming_msg.header = msg->header;
         aiming_msg.header.frame_id = target_frame_;
-        aiming_msg.frame_number = frame_count_++;
         aiming_msg.spin_direction = msg->spin_direction;
-        aiming_msg.pixel_r_center_x = msg->r_center_x;
-        aiming_msg.pixel_r_center_y = msg->r_center_y;
-        aiming_msg.pixel_radius = msg->radius;
-        aiming_msg.buff_type = msg->is_bigbuff;
+        aiming_msg.is_bigbuff = msg->is_bigbuff;
         aiming_msg.is_tracking = msg->is_tracking;
 
+        bool is_tracking = msg->is_tracking;
+        const bool is_big_buff = msg->is_bigbuff? true : false;
 
-        const bool is_big_buff = msg->is_bigbuff;
-
-        if (!msg->is_tracking) {
+        //不在跟踪时重置状态并发布默认数据
+        if (!is_tracking) {
+            setParaDefaultAimingMsg(aiming_msg);
             predictor_->reset();
             angle_observer_->reset();
             velocity_median_filter_ =
-                std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
+            std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
             isFirst_frame_ = true;
             last_time_since_start_ = 0.0;
             time_since_start_ = 0.0;
             last_angle_ = 0.0f;
-            aiming_msg.fit_start_time_sec = fit_start_time_;
-            aiming_msg.fit_buffer_duration_sec = 0.0f;
-            aiming_msg.fit_data_point_count = 0;
             aiming_pub_->publish(aiming_msg);
             return;
         }
 
         if (is_big_buff) {
             clockMode direction_mode = clockMode::unknown;
-            if (msg->spin_direction == 1) {
+            if (msg->spin_direction == -1) {
                 direction_mode = clockMode::anticlockwise;
-            } else if (msg->spin_direction == 2) {
+            } else if (msg->spin_direction == 1) {
                 direction_mode = clockMode::clockwise;
             }
             angle_observer_->setClockMode(direction_mode);
@@ -239,24 +234,18 @@ private:
 
             last_time_since_start_ = time_since_start_;
             last_angle_ = angle_observer_->last_angle_;
+        
+            //小符仅做坐标转换，不进行拟合
         } else {
-            // small buff: 仅做坐标转换，不进行拟合
             predictor_->reset();
             angle_observer_->reset();
             velocity_median_filter_ =
-                std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
+             std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
             isFirst_frame_ = true;
             last_time_since_start_ = 0.0;
             time_since_start_ = 0.0;
             last_angle_ = 0.0f;
-
-            aiming_msg.sin_a = 0.0f;
-            aiming_msg.sin_omega = 0.0f;
-            aiming_msg.sin_phi = 0.0f;
-            aiming_msg.sin_b = 0.0f;
-            aiming_msg.fit_start_time_sec = 0.0;
-            aiming_msg.fit_buffer_duration_sec = 0.0f;
-            aiming_msg.fit_data_point_count = 0;
+            setParaDefaultAimingMsg(aiming_msg);
         }
 
         const double depth = coord_solver_->computeDepthFromRadius(msg->radius);
@@ -272,14 +261,9 @@ private:
             target_cam.point =
                 coord_solver_->pixelToCamera(msg->target_center_x, msg->target_center_y, depth);
 
-            geometry_msgs::msg::PointStamped r_odom;
             geometry_msgs::msg::PointStamped target_odom;
-            const bool r_ok = transformPointToTarget(r_cam, msg->header.stamp, r_odom);
             const bool target_ok = transformPointToTarget(target_cam, msg->header.stamp, target_odom);
-            if (r_ok && target_ok) {
-                aiming_msg.r_center_x_3d = r_odom.point.x;
-                aiming_msg.r_center_y_3d = r_odom.point.y;
-                aiming_msg.r_center_z_3d = r_odom.point.z;
+            if (target_ok) {
                 aiming_msg.target_x_3d = static_cast<float>(target_odom.point.x);
                 aiming_msg.target_y_3d = static_cast<float>(target_odom.point.y);
                 aiming_msg.target_z_3d = static_cast<float>(target_odom.point.z);
@@ -292,10 +276,35 @@ private:
                 "Invalid radius for depth solve: %.4f",
                 msg->radius);
         }
-
         aiming_pub_->publish(aiming_msg);
     }
 
+    void setDefaultAimingMsg(buff_interfaces::msg::BuffAimingData& aiming_msg)
+    {
+        aiming_msg.is_bigbuff = 0;
+        aiming_msg.spin_direction = 0;
+        aiming_msg.target_x_3d = 0.0f;
+        aiming_msg.target_y_3d = 0.0f;
+        aiming_msg.target_z_3d = 0.0f;
+        aiming_msg.sin_a = 0.0f;
+        aiming_msg.sin_omega = 0.0f;
+        aiming_msg.sin_phi = 0.0f;
+        aiming_msg.sin_b = 0.0f;
+        aiming_msg.fit_start_time_sec = 0.0f;
+        aiming_msg.fit_buffer_duration_sec = 0.0f; 
+        aiming_msg.fit_data_point_count = 0.0f;
+    }
+
+    void setParaDefaultAimingMsg(buff_interfaces::msg::BuffAimingData& aiming_msg)
+    {
+        aiming_msg.sin_a = 0.0f;
+        aiming_msg.sin_omega = 0.0f;
+        aiming_msg.sin_phi = 0.0f;
+        aiming_msg.sin_b = 0.0f;
+        aiming_msg.fit_start_time_sec = 0.0f;
+        aiming_msg.fit_buffer_duration_sec = 0.0f;
+        aiming_msg.fit_data_point_count = 0.0f;
+    }
 
     rclcpp::Subscription<buff_interfaces::msg::BuffTarget>::SharedPtr target_sub_;
     rclcpp::Publisher<buff_interfaces::msg::BuffAimingData>::SharedPtr aiming_pub_;
@@ -309,9 +318,6 @@ private:
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
     std::unique_ptr<MedianFilter> velocity_median_filter_;
-
-  
-    int frame_count_ = 0;
 
     // TF frame settings
     std::string target_frame_;
