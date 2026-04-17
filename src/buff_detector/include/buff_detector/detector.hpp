@@ -2,6 +2,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <string>
+#include <cstdint>
 
 struct BuffDetectorConfig
 {
@@ -116,6 +117,13 @@ private:
     int lighted_blade_num_ = 0;                             // 亮起的扇叶数量
                             // 记录亮起过的最大扇叶数量，用于判断是否结束
     int lost_frame_count_ = 0;                              // 目标丢失帧数
+    uint8_t spin_direction_ = 0;                            // 旋转方向: 0=unknown, 1=anticlockwise, 2=clockwise
+    uint8_t pending_spin_direction_ = 0;                    // 候选方向
+    int pending_direction_count_ = 0;                       // 候选方向连续计数
+    int direction_confirm_frames_ = 3;                      // 连续确认帧数（稳定优先）
+    float last_target_angle_ = 0.0f;                        // 上一帧目标角度
+    bool has_last_target_angle_ = false;                    // 是否已初始化上一帧目标角度
+    float min_valid_angle_step_ = 0.003f;                   // 有效角度变化下限（抑制抖动）
                                     // 调试帧图像
     BuffType buff_type_ = BuffType::small_buff;             // 能量机关类型
     BuffDetectorConfig config_;
@@ -124,6 +132,8 @@ private:
     bool preprocess_image(cv::Mat& frame);                          // 获取预处理后的二值图
     bool update_R_box(cv::Mat& image, bool is_init = false);        // 获取R标框
     bool update_fan_blades(cv::Mat& image);                         // 检测扇叶位置
+    void reset_spin_direction_state();                               // 重置方向状态机
+    void update_spin_direction_by_target_id();                       // 根据目标扇叶ID更新方向
     
 
 public:
@@ -137,6 +147,7 @@ public:
     const std::vector<FanBlade>& get_target_fan_blades() const { return target_blades_; }
     BBox get_current_R_box() const { return current_R_box_; }                // 获取当前R标框
     float get_radius() const { return buff_radius_; }                             // 获取能量机关半径
+    uint8_t get_spin_direction() const { return spin_direction_; }
     cv::Mat debug_frame_;             // 获取调试图像
     int max_lighted_blade_num_ = 0; 
     BuffType get_buff_type() const { return buff_type_; } // 获取当前buff模式

@@ -87,8 +87,6 @@ enum clockMode{
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     private:
     clockMode mode_;
-    int direction_detect_count_ = 0;       // 检测次数
-    float total_angle_diff_ = 0.0f;        // 累计的角度变化量
     cv::Point2f last_point_;
     int blade_jump_count_;
     bool is_first_angle_;
@@ -99,5 +97,7 @@ enum clockMode{
     Vector2f Rotation(float theta, Vector2f vector);
     float AngleTransformer(float x, float y);
     clockMode getClockMode() const;
+    void setClockMode(clockMode mode);
+    void reset();
     float update(float target_x, float target_y, float radius);
 };

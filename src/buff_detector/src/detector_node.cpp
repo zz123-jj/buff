@@ -50,12 +50,12 @@ public:
             this->get_parameter("upper_v").as_int());
         detector_config_.dilate_kernel_size = this->get_parameter("dilate_kernel_size").as_int();
         detector_config_.max_lost_frame = this->get_parameter("max_lost_frame").as_int();
-        debug_image_frame_id_ = this->get_parameter("debug_image_frame_id").as_string();
+        //debug_image_frame_id_ = this->get_parameter("debug_image_frame_id").as_string();
 
         // 初始化检测器
         detector_ = std::make_unique<BuffDetector>();
         detector_->set_config(detector_config_);
-        video_img_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/image_raw", rclcpp::QoS(rclcpp::KeepLast(1)).reliable()); 
+        //video_img_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/image_raw", rclcpp::QoS(rclcpp::KeepLast(1)).reliable()); 
         // 订阅图像
         img_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             "/image_raw",
@@ -136,6 +136,7 @@ private:
         target_msg.r_center_x = r_center.x;
         target_msg.r_center_y = r_center.y;
         target_msg.is_tracking = is_tracking_;
+        target_msg.spin_direction = detector_->get_spin_direction();
         target_pub_->publish(target_msg);
         }
         // 显示调试信息
@@ -156,27 +157,30 @@ private:
         }
        
     }
-    void sendVedioImage(cv::Mat frame){
-     video_capture_.read(frame);
-        auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8",frame).toImageMsg();
-        msg->header.stamp = this->now();
-        video_img_pub_->publish(*msg);
-}
+    // void sendVedioImage(cv::Mat frame){
+    //  video_capture_.read(frame);
+    //     auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8",frame).toImageMsg();
+    //     msg->header.stamp = this->now();
+    //     video_img_pub_->publish(*msg);}
 
     // ROS2 通信
     rclcpp::Publisher<buff_interfaces::msg::BuffTarget>::SharedPtr target_pub_;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr img_sub_;
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr video_img_pub_; 
+    //rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr video_img_pub_; 
     
     // 检测器
     std::unique_ptr<BuffDetector> detector_;
+    // 配置
     BuffDetectorConfig detector_config_;
-    image_transport::Publisher debug_image_pub_;
 
-    // 状态
+    image_transport::Publisher debug_image_pub_;
+    
+    std::string debug_image_frame_id_ = "camera";    
+
+  // 状态
     bool is_tracking_ = false;
-    std::string debug_image_frame_id_ = "camera";
-    cv::VideoCapture video_capture_;
+ 
+   // cv::VideoCapture video_capture_;
     cv::Mat video_frame_;
 };
 

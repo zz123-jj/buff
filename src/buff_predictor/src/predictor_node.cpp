@@ -153,19 +153,25 @@ private:
         aiming_msg.header = msg->header;
         aiming_msg.header.frame_id = target_frame_;
         aiming_msg.frame_number = frame_count_++;
-        aiming_msg.spin_direction = static_cast<uint8_t>(angle_observer_->getClockMode());
+        aiming_msg.spin_direction = msg->spin_direction;
         aiming_msg.pixel_r_center_x = msg->r_center_x;
         aiming_msg.pixel_r_center_y = msg->r_center_y;
         aiming_msg.pixel_radius = msg->radius;
+        aiming_msg.buff_type = msg->buff_type;
+        aiming_msg.is_tracking = msg->is_tracking;
+
 
         const bool is_big_buff = msg->buff_type;
 
         if (!msg->is_tracking) {
             predictor_->reset();
+            angle_observer_->reset();
             velocity_median_filter_ =
                 std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
             isFirst_frame_ = true;
-            aiming_msg.is_tracking = false;
+            last_time_since_start_ = 0.0;
+            time_since_start_ = 0.0;
+            last_angle_ = 0.0f;
             aiming_msg.fit_start_time_sec = fit_start_time_;
             aiming_msg.fit_buffer_duration_sec = 0.0f;
             aiming_msg.fit_data_point_count = 0;
@@ -174,6 +180,14 @@ private:
         }
 
         if (is_big_buff) {
+            clockMode direction_mode = clockMode::unknown;
+            if (msg->spin_direction == 1) {
+                direction_mode = clockMode::anticlockwise;
+            } else if (msg->spin_direction == 2) {
+                direction_mode = clockMode::clockwise;
+            }
+            angle_observer_->setClockMode(direction_mode);
+
             // 计算向量：扇叶框中心 - R框中心
             float vector_x = msg->target_center_x - msg->r_center_x;
             float vector_y = msg->target_center_y - msg->r_center_y;
@@ -207,7 +221,6 @@ private:
                 predictor_->try_fit_once_at_1p5s();
             }
 
-            aiming_msg.is_tracking = predictor_->is_completed();
             if (predictor_->is_completed()) {
                 const Vector4f params = predictor_->get_velocity_fit_params();
                 aiming_msg.sin_a = params[0];
@@ -229,13 +242,14 @@ private:
         } else {
             // small buff: 仅做坐标转换，不进行拟合
             predictor_->reset();
+            angle_observer_->reset();
             velocity_median_filter_ =
                 std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
             isFirst_frame_ = true;
             last_time_since_start_ = 0.0;
             time_since_start_ = 0.0;
+            last_angle_ = 0.0f;
 
-            aiming_msg.is_tracking = true;
             aiming_msg.sin_a = 0.0f;
             aiming_msg.sin_omega = 0.0f;
             aiming_msg.sin_phi = 0.0f;

@@ -249,6 +249,7 @@ bool BuffDetector::init(cv::Mat& frame)
 
     // 初始化亮起扇叶数量
     lighted_blade_num_ = 0;
+    reset_spin_direction_state();
 
     // 计算能量机关半径
     if (target_blades_.empty())
@@ -722,6 +723,8 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
         return false;
     }
 
+    update_spin_direction_by_target_id();
+
     const FanBlade& ref_target = target_blades_.front();
     for (auto& fan_blade : blade_list_)
     {
@@ -732,6 +735,59 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
     }
 
     return true;
+}
+
+void BuffDetector::reset_spin_direction_state()
+{
+    spin_direction_ = 0;
+    pending_spin_direction_ = 0;
+    pending_direction_count_ = 0;
+    has_last_target_angle_ = false;
+    last_target_angle_ = 0.0f;
+}
+
+void BuffDetector::update_spin_direction_by_target_id()
+{
+    if (buff_type_ != BuffType::big_buff || target_blades_.empty()) {
+        reset_spin_direction_state();
+        return;
+    }
+
+    const cv::Point2f target_center = target_blades_.front().box.get_center_2f();
+    const cv::Point2f r_center = current_R_box_.get_center_2f();
+    const float current_angle = std::atan2(target_center.y - r_center.y, target_center.x - r_center.x);
+
+    if (!has_last_target_angle_) {
+        has_last_target_angle_ = true;
+        last_target_angle_ = current_angle;
+        return;
+    }
+
+    float angle_diff = current_angle - last_target_angle_;
+    while (angle_diff > static_cast<float>(M_PI)) {
+        angle_diff -= static_cast<float>(2.0 * M_PI);
+    }
+    while (angle_diff < static_cast<float>(-M_PI)) {
+        angle_diff += static_cast<float>(2.0 * M_PI);
+    }
+    last_target_angle_ = current_angle;
+
+    if (std::fabs(angle_diff) < min_valid_angle_step_ || std::fabs(angle_diff) > static_cast<float>(M_PI / 2.0)) {
+        return;
+    }
+
+    const uint8_t candidate_direction = angle_diff > 0.0f ? 1 : 2;
+
+    if (candidate_direction == pending_spin_direction_) {
+        ++pending_direction_count_;
+    } else {
+        pending_spin_direction_ = candidate_direction;
+        pending_direction_count_ = 1;
+    }
+
+    if (pending_direction_count_ >= direction_confirm_frames_) {
+        spin_direction_ = pending_spin_direction_;
+    }
 }
 
 bool BuffDetector::update_R_box(cv::Mat& image, bool is_init)

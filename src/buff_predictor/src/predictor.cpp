@@ -41,7 +41,7 @@ bool Big_Buff_Predictor::try_fit_once_at_1p5s() {
         return false;
     }
 
-    if (time_w_pairs_.back().first < fit_window_sec_) {
+    if (time_w_pairs_.back().first < fit_window_sec_-0.3) {
         return false;
     }
  
@@ -187,6 +187,21 @@ clockMode angleObserver::getClockMode() const {
     return mode_;
 }
 
+void angleObserver::setClockMode(clockMode mode) {
+    if (mode_ != mode) {
+        blade_jump_count_ = 0;
+    }
+    mode_ = mode;
+}
+
+void angleObserver::reset() {
+    mode_ = clockMode::unknown;
+    last_point_ = cv::Point2f(-1.0f, -1.0f);
+    blade_jump_count_ = 0;
+    is_first_angle_ = true;
+    last_angle_ = 0.0f;
+}
+
 //x, y: 目标的当前坐标（相对于旋转中心）raduis: 旋转半径
 //检查是否发生72度倍数的跳变 如果跳变则反向旋转坐标进行校正
 //返回连续化后的角度（弧度）
@@ -202,32 +217,12 @@ float angleObserver::update(float target_x, float target_y, float raduis) {
         return AngleTransformer(target_x, target_y);
     }
     
-    // 2. 如果方向是未知的，尝试进行方向判定
+    // 2. 方向未知时仅做角度连续化，不做依赖方向符号的跳变修正
     if (mode_ == clockMode::unknown) {
-        // 在没有跳变时（两帧之间距离在合理范围内），采集角度增量
-        float dist = euclidean_distance(last_point_, cv::Point2f(target_x, target_y));
-        if (dist < raduis * 0.8f) { // 小于半径认为没有发生跳变
-            float current_raw_angle = AngleTransformer(target_x, target_y); // 获取连续化角度
-            float angle_diff = current_raw_angle - last_angle_;
-            total_angle_diff_ += angle_diff;
-            direction_detect_count_++;
-            
-            // 累计采集到 5~10 帧数据后，再做出判断
-            if (direction_detect_count_ > 5) { 
-                if (total_angle_diff_ > 0) {
-                    mode_ = clockMode::anticlockwise; // 角度差和为正，认为是逆时针旋转
-                } else if(total_angle_diff_ < 0){
-                    mode_ = clockMode::clockwise;     // 角度差和为负，认为是顺时针旋转
-                }
-            }
-            
-            last_point_.x = target_x;
-            last_point_.y = target_y;
-            return current_raw_angle;
-        } else {
-            // 如果在方向未确定的时候就发生跳变，可以丢弃此帧或者重置判定
-            return AngleTransformer(target_x, target_y); 
-        }
+        float current_raw_angle = AngleTransformer(target_x, target_y);
+        last_point_.x = target_x;
+        last_point_.y = target_y;
+        return current_raw_angle;
     }
 
     // 根据旋转方向确定旋转角度的符号
