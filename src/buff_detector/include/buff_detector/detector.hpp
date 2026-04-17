@@ -6,6 +6,7 @@
 struct BuffDetectorConfig
 {
     std::string model_path = "src/buff_detector/model/Fan.onnx";
+    bool use_cuda = false;
     float confidence_threshold = 0.5f;
     float iou_threshold = 0.5f;
     bool debug_mode = true;

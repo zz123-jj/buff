@@ -1,4 +1,6 @@
 from launch import LaunchDescription
+from launch.actions import SetEnvironmentVariable
+from launch.substitutions import EnvironmentVariable
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -17,6 +19,20 @@ def generate_launch_description():
     ])
 
     return LaunchDescription([
+        SetEnvironmentVariable(
+            name='LD_LIBRARY_PATH',
+            value=[
+                '/home/caleb/onnxruntime/lib:'
+                '/home/caleb/.local/lib/python3.10/site-packages/nvidia/cuda_runtime/lib:'
+                '/home/caleb/.local/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib:'
+                '/home/caleb/.local/lib/python3.10/site-packages/nvidia/cublas/lib:'
+                '/home/caleb/.local/lib/python3.10/site-packages/nvidia/cudnn/lib:'
+                '/home/caleb/.local/lib/python3.10/site-packages/nvidia/curand/lib:'
+                '/home/caleb/.local/lib/python3.10/site-packages/nvidia/cufft/lib:'
+                '/usr/local/cuda/lib64:',
+                EnvironmentVariable('LD_LIBRARY_PATH', default_value='')
+            ]
+        ),
         # 启动检测节点
         Node(
             package='buff_detector',

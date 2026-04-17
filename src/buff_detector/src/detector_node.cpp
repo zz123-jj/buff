@@ -13,6 +13,7 @@ public:
     BuffDetectorNode() : Node("buff_detector_node")
     {
         this->declare_parameter<std::string>("model_path", "src/buff_detector/model/Fan.onnx");
+        this->declare_parameter<bool>("use_cuda", false);
         this->declare_parameter<double>("confidence_threshold", 0.5);
         this->declare_parameter<double>("iou_threshold", 0.5);
         this->declare_parameter<bool>("debug_mode", true);
@@ -29,6 +30,7 @@ public:
         this->declare_parameter<std::string>("debug_image_frame_id", "camera");
 
         detector_config_.model_path = this->get_parameter("model_path").as_string();
+        detector_config_.use_cuda = this->get_parameter("use_cuda").as_bool();
         detector_config_.confidence_threshold =
             static_cast<float>(this->get_parameter("confidence_threshold").as_double());
         detector_config_.iou_threshold =
@@ -108,9 +110,9 @@ private:
             {
                 is_tracking_ = true;
                 RCLCPP_INFO(this->get_logger(), "Detector initialized.");
-            }
+            }else{
             RCLCPP_INFO(this->get_logger(),"Failed to initialize detector.");
-        }
+        }}
 
         // 更新检测
         if (is_tracking_)

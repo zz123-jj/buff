@@ -51,6 +51,14 @@ char* BlobFromImage(cv::Mat& iImg, T& iBlob) {
 
 char* YOLO_V8::PreProcess(cv::Mat& iImg, std::vector<int> iImgSize, cv::Mat& oImg)
 {
+    if (iImg.empty() || iImgSize.size() < 2 || iImgSize.at(0) <= 0 || iImgSize.at(1) <= 0)
+    {
+        return "[YOLO_V8]:Invalid input image or model input size.";
+    }
+
+    const int target_h = iImgSize.at(0);
+    const int target_w = iImgSize.at(1);
+
     if (iImg.channels() == 3)
     {
         oImg = iImg.clone();
@@ -68,18 +76,18 @@ char* YOLO_V8::PreProcess(cv::Mat& iImg, std::vector<int> iImgSize, cv::Mat& oIm
     case YOLO_DETECT_V8_HALF:
     case YOLO_POSE_V8_HALF://LetterBox
     {
-        if (iImg.cols >= iImg.rows)
-        {
-            resizeScales = iImg.cols / (float)iImgSize.at(0);
-            cv::resize(oImg, oImg, cv::Size(iImgSize.at(0), int(iImg.rows / resizeScales)));
-        }
-        else
-        {
-            resizeScales = iImg.rows / (float)iImgSize.at(0);
-            cv::resize(oImg, oImg, cv::Size(int(iImg.cols / resizeScales), iImgSize.at(1)));
-        }
-        cv::Mat tempImg = cv::Mat::zeros(iImgSize.at(0), iImgSize.at(1), CV_8UC3);
-        oImg.copyTo(tempImg(cv::Rect(0, 0, oImg.cols, oImg.rows)));
+        const float scale_x = static_cast<float>(target_w) / static_cast<float>(iImg.cols);
+        const float scale_y = static_cast<float>(target_h) / static_cast<float>(iImg.rows);
+        const float scale = (scale_x < scale_y) ? scale_x : scale_y;
+
+        const int resized_w = std::max(1, static_cast<int>(iImg.cols * scale));
+        const int resized_h = std::max(1, static_cast<int>(iImg.rows * scale));
+
+        resizeScales = 1.0f / scale;
+        cv::resize(oImg, oImg, cv::Size(resized_w, resized_h));
+
+        cv::Mat tempImg = cv::Mat::zeros(target_h, target_w, CV_8UC3);
+        oImg.copyTo(tempImg(cv::Rect(0, 0, resized_w, resized_h)));
         oImg = tempImg;
         break;
     }
@@ -181,7 +189,11 @@ char* YOLO_V8::RunSession(cv::Mat& iImg, std::vector<DL_RESULT>& oResult) {
 
     char* Ret = RET_OK;
     cv::Mat processedImg;
-    PreProcess(iImg, imgSize, processedImg);
+    Ret = PreProcess(iImg, imgSize, processedImg);
+    if (Ret != RET_OK)
+    {
+        return Ret;
+    }
     if (modelType < 4)
     {
         float* blob = new float[processedImg.total() * 3];
@@ -340,12 +352,16 @@ char* YOLO_V8::TensorProcess(clock_t& starttime_1, cv::Mat& iImg, N& blob, std::
 
 char* YOLO_V8::WarmUpSession() {
     clock_t starttime_1 = clock();
-    cv::Mat iImg = cv::Mat(cv::Size(imgSize.at(0), imgSize.at(1)), CV_8UC3);
+    cv::Mat iImg = cv::Mat(cv::Size(imgSize.at(1), imgSize.at(0)), CV_8UC3);
     cv::Mat processedImg;
-    PreProcess(iImg, imgSize, processedImg);
+    char* Ret = PreProcess(iImg, imgSize, processedImg);
+    if (Ret != RET_OK)
+    {
+        return Ret;
+    }
     if (modelType < 4)
     {
-        float* blob = new float[iImg.total() * 3];
+        float* blob = new float[processedImg.total() * 3];
         BlobFromImage(processedImg, blob);
         std::vector<int64_t> YOLO_input_node_dims = { 1, 3, imgSize.at(0), imgSize.at(1) };
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(

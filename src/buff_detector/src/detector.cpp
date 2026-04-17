@@ -380,8 +380,27 @@ bool BuffDetector::detect_by_yolo(cv::Mat& frame)
         yolo_param.modelPath = config_.model_path;
         yolo_param.imgSize = {480, 640}; // 模型期望的输入尺寸 {height, width}
         yolo_param.modelType = YOLO_DETECT_V8;
-        yolo_param.cudaEnable = false;
-        yolo_detector.CreateSession(yolo_param);
+        yolo_param.cudaEnable = config_.use_cuda;
+
+        char* create_ret = yolo_detector.CreateSession(yolo_param);
+        if (create_ret != RET_OK && yolo_param.cudaEnable)
+        {
+            RCLCPP_WARN(
+                rclcpp::get_logger("BuffDetector"),
+                "YOLO CUDA session init failed, fallback to CPU session."
+            );
+            yolo_param.cudaEnable = false;
+            create_ret = yolo_detector.CreateSession(yolo_param);
+        }
+
+        if (create_ret != RET_OK)
+        {
+            RCLCPP_ERROR(
+                rclcpp::get_logger("BuffDetector"),
+                "YOLO session init failed, skip this frame."
+            );
+            return false;
+        }
         loaded = true;
     }
 
@@ -730,12 +749,12 @@ bool BuffDetector::update_R_box(cv::Mat& image, bool is_init)
     {
         // 将轮廓拟合为最小外接正矩形
         cv::Rect rect = cv::boundingRect(contour); // 计算外接正矩形
-        BBox rtn_box(
+        BBox bounding_box(
             static_cast<float>(rect.x), static_cast<float>(rect.y), static_cast<float>(rect.x + rect.width),
             static_cast<float>(rect.y + rect.height)
         );
         float distance_to_last_center = euclidean_distance(
-            rtn_box.get_center_2f(), last_R_box.get_center_2f()
+            bounding_box.get_center_2f(), last_R_box.get_center_2f()
         );
 
         if (is_init)
@@ -743,19 +762,19 @@ bool BuffDetector::update_R_box(cv::Mat& image, bool is_init)
             // 初始化时：只考虑距离近的框
             if (distance_to_last_center < 0.1f * buff_radius_)
             {
-                candidate_boxes.push_back(rtn_box);
+                candidate_boxes.push_back(bounding_box);
             }
         }
         else
         {
             // 跟踪时：检查宽高比例和距离
-            if (rtn_box.get_width() > last_R_box.get_width() * 0.8f &&
-                rtn_box.get_width() < last_R_box.get_width() * 1.2f &&
-                rtn_box.get_height() > last_R_box.get_height() * 0.8f &&
-                rtn_box.get_height() < last_R_box.get_height() * 1.2f &&
+            if (bounding_box.get_width() > last_R_box.get_width() * 0.8f &&
+                bounding_box.get_width() < last_R_box.get_width() * 1.2f &&
+                bounding_box.get_height() > last_R_box.get_height() * 0.8f &&
+                bounding_box.get_height() < last_R_box.get_height() * 1.2f &&
                 distance_to_last_center < 2.0f * buff_radius_)
             {
-                candidate_boxes.push_back(rtn_box);
+                candidate_boxes.push_back(bounding_box);
             }
         }
     }

@@ -1,6 +1,7 @@
 buff_detector_node:
   ros__parameters:
     model_path: src/buff_detector/model/Fan.onnx
+    use_cuda: false
     confidence_threshold: 0.5
     iou_threshold: 0.5
     debug_mode: true
