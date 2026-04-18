@@ -19,9 +19,8 @@ class BuffPredictorNode : public rclcpp::Node
 public:
     BuffPredictorNode() : Node("buff_predictor_node")
     {
-        predictor_ = std::make_unique<Big_Buff_Predictor>();
         
-        // 角度连续化初始化
+        predictor_ = std::make_unique<Big_Buff_Predictor>();
         angle_observer_ = std::make_unique<angleObserver>(clockMode::unknown);
 
         this->declare_parameter<std::string>("target_frame", "odom");
@@ -65,7 +64,6 @@ public:
 
         velocity_median_filter_ =
             std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
-        predictor_->set_debug_mode(debug_mode_);
         predictor_->set_fit_config(
             fit_offset_sum_,
             fit_window_sec_,
@@ -152,16 +150,12 @@ private:
         buff_interfaces::msg::BuffAimingData aiming_msg;
         aiming_msg.header = msg->header;
         aiming_msg.header.frame_id = target_frame_;
-        aiming_msg.spin_direction = msg->spin_direction;
-        aiming_msg.is_bigbuff = msg->is_bigbuff;
-        aiming_msg.is_tracking = msg->is_tracking;
-
         bool is_tracking = msg->is_tracking;
         const bool is_big_buff = msg->is_bigbuff? true : false;
+        aiming_msg.is_tracking = is_tracking;
 
-        //不在跟踪时重置状态并发布默认数据
         if (!is_tracking) {
-            setParaDefaultAimingMsg(aiming_msg);
+            setDefaultAimingMsg(aiming_msg);
             predictor_->reset();
             angle_observer_->reset();
             velocity_median_filter_ =
@@ -173,7 +167,41 @@ private:
             aiming_pub_->publish(aiming_msg);
             return;
         }
+        
+        aiming_msg.is_bigbuff = is_big_buff;
+        aiming_msg.spin_direction = msg->spin_direction;
+        
+        // 计算深度并转换坐标
+        const double depth = coord_solver_->computeDepthFromRadius(msg->radius);
+        if (depth > 0.0) {
+            geometry_msgs::msg::PointStamped r_cam;
+            r_cam.header.stamp = msg->header.stamp;
+            r_cam.header.frame_id = camera_frame_;
+            r_cam.point = coord_solver_->pixelToCamera(msg->r_center_x, msg->r_center_y, depth);
 
+            geometry_msgs::msg::PointStamped target_cam;
+            target_cam.header.stamp = msg->header.stamp;
+            target_cam.header.frame_id = camera_frame_;
+            target_cam.point =
+                coord_solver_->pixelToCamera(msg->target_center_x, msg->target_center_y, depth);
+
+            geometry_msgs::msg::PointStamped target_odom;
+            const bool target_ok = transformPointToTarget(target_cam, msg->header.stamp, target_odom);
+            if (target_ok) {
+                aiming_msg.target_x_3d = static_cast<float>(target_odom.point.x);
+                aiming_msg.target_y_3d = static_cast<float>(target_odom.point.y);
+                aiming_msg.target_z_3d = static_cast<float>(target_odom.point.z);
+            }
+        } else {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "Invalid radius for depth solve: %.4f",
+                msg->radius);
+        }
+
+        //不在跟踪时重置状态并发布默认数据
         if (is_big_buff) {
             clockMode direction_mode = clockMode::unknown;
             if (msg->spin_direction == -1) {
@@ -214,6 +242,12 @@ private:
             }
             if (!predictor_->is_completed() && time_since_start_ >= fit_window_sec_) {
                 predictor_->try_fit_once_at_1p5s();
+                if(debug_mode_){
+                    debug_csv_<<'\n' << predictor_->get_velocity_fit_params()[0] << ","
+                                     << predictor_->get_velocity_fit_params()[1] << ","
+                                     << predictor_->get_velocity_fit_params()[2] << ","
+                                     << predictor_->get_velocity_fit_params()[3] << '\n'<<std::endl;
+                }
             }
 
             if (predictor_->is_completed()) {
@@ -248,34 +282,7 @@ private:
             setParaDefaultAimingMsg(aiming_msg);
         }
 
-        const double depth = coord_solver_->computeDepthFromRadius(msg->radius);
-        if (depth > 0.0) {
-            geometry_msgs::msg::PointStamped r_cam;
-            r_cam.header.stamp = msg->header.stamp;
-            r_cam.header.frame_id = camera_frame_;
-            r_cam.point = coord_solver_->pixelToCamera(msg->r_center_x, msg->r_center_y, depth);
-
-            geometry_msgs::msg::PointStamped target_cam;
-            target_cam.header.stamp = msg->header.stamp;
-            target_cam.header.frame_id = camera_frame_;
-            target_cam.point =
-                coord_solver_->pixelToCamera(msg->target_center_x, msg->target_center_y, depth);
-
-            geometry_msgs::msg::PointStamped target_odom;
-            const bool target_ok = transformPointToTarget(target_cam, msg->header.stamp, target_odom);
-            if (target_ok) {
-                aiming_msg.target_x_3d = static_cast<float>(target_odom.point.x);
-                aiming_msg.target_y_3d = static_cast<float>(target_odom.point.y);
-                aiming_msg.target_z_3d = static_cast<float>(target_odom.point.z);
-            }
-        } else {
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                1000,
-                "Invalid radius for depth solve: %.4f",
-                msg->radius);
-        }
+        
         aiming_pub_->publish(aiming_msg);
     }
 

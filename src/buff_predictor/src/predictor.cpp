@@ -89,13 +89,7 @@ bool Big_Buff_Predictor::try_fit_once_at_1p5s() {
     velocity_fit_params_[2] = static_cast<float>(phi);
     velocity_fit_params_[3] = static_cast<float>(fit_offset_sum_ - A);
     fit_ready_ = true;
-    if (debug_mode_) {
-        std::cout << "拟合完成: A=" << velocity_fit_params_[0] 
-                  << ", omega=" << velocity_fit_params_[1] 
-                  << ", phi=" << velocity_fit_params_[2] 
-                  << ", b=" << velocity_fit_params_[3] 
-                  << std::endl;
-    }
+
     return true;
 }
 

@@ -19,7 +19,6 @@ class Big_Buff_Predictor {
     bool fit_attempted_ = false;//是否已经尝试过拟合
     bool fit_ready_ = false;//是否拟合完成并准备好预测结果
     Vector4f velocity_fit_params_ = Vector4f::Zero();  // [A, omega, phi, b]
-    bool debug_mode_ = false;
     double fit_offset_sum_ = 2.090;
     double fit_window_sec_ = 1.5;
     int fit_min_samples_ = 10;
@@ -36,7 +35,6 @@ class Big_Buff_Predictor {
     bool try_fit_once_at_1p5s();
     bool is_completed() const { return fit_ready_; }
     bool has_fit_attempted() const { return fit_attempted_; }
-    void set_debug_mode(bool debug_mode) { debug_mode_ = debug_mode; }
     void set_fit_config(
         double fit_offset_sum,
         double fit_window_sec,
