@@ -1,0 +1,86 @@
+# ======================================================================
+# 能量机关自瞄系统参数配置文件
+# 用于 buff_detector、buff_predictor、buff_solver 三个节点
+# ======================================================================
+
+# -------------------- 检测节点 (buff_detector) --------------------
+buff_detector_node:
+  ros__parameters:
+      model_path: src/buff_detector/model/Fan.onnx
+      use_cuda: false
+      confidence_threshold: 0.5
+      iou_threshold: 0.5
+      debug_mode: true
+      inside_shade_rate: 0.7
+      outside_shade_rate: 1.39
+      lower_h: 0
+      lower_s: 40
+      lower_v: 220
+      upper_h: 70
+      upper_s: 255
+      upper_v: 255
+      dilate_kernel_size: 7
+      max_lost_frame: 5
+      debug_image_frame_id: camera
+
+
+
+# -------------------- 预测节点 (buff_predictor) --------------------
+buff_predictor_node:
+  ros__parameters:
+    target_frame: odom
+    camera_frame: camera_optical_frame
+    debug_mode: true
+    debug_csv_path: buff_predictor_debug.csv
+    physical_arm_length: 1.5
+    velocity_median_window: 3
+    camera_fx: 1303.675283386667
+    camera_fy: 1303.675283386667
+    camera_cx: 720.0
+    camera_cy: 540.0
+    fit_window_sec: 1.5
+    fit_min_samples: 10
+    fit_offset_sum: 2.090
+    fit_a_lower: 0.780
+    fit_a_upper: 1.045
+    fit_omega_lower: 1.884
+    fit_omega_upper: 2.000
+    fit_phi_lower: -3.141592653589793
+    fit_phi_upper: 3.141592653589793
+
+
+# -------------------- 自瞄求解节点 (buff_solver) --------------------
+buff_solver_node:
+  ros__parameters:
+    # 弹道模型参数
+    ballistic:
+      # 子弹初速（m/s）
+      bullet_speed: 15.0
+
+      # 发射机构机械/电路延迟（秒）
+      shoot_delay: 0.05
+
+      # 重力加速度（m/s²）
+      gravity: 9.81
+
+      # 空气阻力系数 k，公式：F_air = -k * v
+      air_k: 0.001
+
+      # 弹道迭代收敛阈值：飞行时间变化小于此值时停止迭代（秒）
+      converge_thresh: 0.002
+
+      # 弹道仿真步长（秒）
+      sim_dt: 0.005
+
+    # 自瞄控制参数
+    aiming:
+      # 是否发布调试话题（/autoaim/debug）
+      debug: true
+
+    # 坐标系名称
+    frames:
+      odom: "odom"                      # 输入目标坐标的参考系
+      gimbal: "gimbal_yaw_link"         # 云台 yaw 关节坐标系（枪口 +X，Z 向上）
+
+    # 能量机关物理旋转半径（米），与 predictor 中的 arm_length 保持一致
+    physical_radius: 1.5

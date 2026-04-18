@@ -1,0 +1,62 @@
+camera_publisher:
+  ros__parameters:
+    # NOTE: 运行时开关
+    is_rotate: true
+    rotate_type: 1
+    # ROTATE_90_CLOCKWISE = 0, //!<Rotate 90 degrees clockwise
+    # ROTATE_180 = 1, //!<Rotate 180 degrees clockwise
+    # ROTATE_90_COUNTERCLOCKWISE = 2, //!<Rotate 270 degrees clockwise
+    show_cam: false
+    show_params: false
+
+    # NOTE: 设备 & 采集
+    device:
+      serial: "0"
+
+    sensor:
+      width: 1920
+      height: 1200
+    roi:
+      width: 1920
+      height: 720
+
+    binning: 1
+    fps: 160.0
+    exposure: 1500
+    gain: 24
+    isEnergy: false
+
+    # NOTE: 话题 & 帧名
+    camera_topic: "image_raw"
+    frame_id: "camera_optical_frame"
+
+    camera_info_topic: "camera_info"
+
+    # NOTE: 定时器周期（毫秒）
+    timers:
+      image_ms: 6
+      info_ms: 10
+
+    # NOTE: QoS（可选：先保留默认，也可做成可选值 reliable/besteffort、volatile/transient_local）
+    info_qos:
+      depth: 1
+      reliability: "reliable"
+      durability: "transient_local"
+
+    # NOTE :calibration
+    calibration:
+      k:
+        [
+          1410.8453,
+          0.0000,
+          960.0,
+          0.0000,
+          1411.2920,
+          600.0,
+          0.0000,
+          0.0000,
+          1.0000,
+        ]
+      d: [-0.082353, 0.149798, 0.000782, -0.000546, -0.055236]
+      model: "plumb_bob"
+      compute_rectified_p: true
