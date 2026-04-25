@@ -1,0 +1,15 @@
+/auto_aim_solver:
+  ros__parameters:
+    gravity: 9.81
+    bullet_speed: 23.0
+    predict_addition: 20.0
+    predict_coeff: 1.0
+    small_armor_radius: 0.042
+    big_armor_radius: 0.10575
+    state_timeout: 0.5
+    shoot_delay: 0.05
+    target_timeout: 0.5
+    max_follow_armor_spin_speed: 7.5
+    min_follow_center_spin_speed: 8.5
+    max_plan_yaw_change_speed: 0.5
+    is_debug: true
