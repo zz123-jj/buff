@@ -117,8 +117,8 @@ private:
     int lighted_blade_num_ = 0;                             // 亮起的扇叶数量
                             // 记录亮起过的最大扇叶数量，用于判断是否结束
     int lost_frame_count_ = 0;                              // 目标丢失帧数
-    uint8_t spin_direction_ = 0;                            // 旋转方向: 0=unknown, -1=人眼anticlockwise, 1=人眼clockwise
-    uint8_t pending_spin_direction_ = 0;                    // 候选方向
+    int8_t spin_direction_ = 0;                            // 旋转方向: 0=unknown, -1=人眼anticlockwise, 1=人眼clockwise
+    int8_t pending_spin_direction_ = 0;                    // 候选方向
     int pending_direction_count_ = 0;                       // 候选方向连续计数
     int direction_confirm_frames_ = 3;                      // 连续确认帧数（稳定优先）
     float last_target_angle_ = 0.0f;                        // 上一帧目标角度
@@ -147,7 +147,7 @@ public:
     const std::vector<FanBlade>& get_target_fan_blades() const { return target_blades_; }
     BBox get_current_R_box() const { return current_R_box_; }                // 获取当前R标框
     float get_radius() const { return buff_radius_; }                             // 获取能量机关半径
-    uint8_t get_spin_direction() const { return spin_direction_; }
+    int8_t get_spin_direction() const { return spin_direction_; }
     cv::Mat debug_frame_; 
     cv::Mat preprocessed_frame_;      // 预处理后的二值图像
     cv::Mat roi_frame_;               // 扇叶ROI图像            // 获取调试图像

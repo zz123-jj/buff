@@ -6,8 +6,6 @@
 #include <opencv2/opencv.hpp>
 #include <rclcpp/publisher_base.hpp>
 #include <rclcpp/rclcpp.hpp>
-
-// 鲁棒包含 cv_bridge 头文件
 #if __has_include("cv_bridge/cv_bridge.hpp")
   #include "cv_bridge/cv_bridge.hpp"
 #elif __has_include("cv_bridge/cv_bridge.h")
@@ -15,7 +13,6 @@
 #else
   #error "cv_bridge headers not found"
 #endif
-
 #include <sensor_msgs/msg/image.hpp>
 #include <image_transport/image_transport.hpp>
 

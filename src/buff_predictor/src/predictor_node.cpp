@@ -202,8 +202,17 @@ private:
 
             geometry_msgs::msg::PointStamped target_center;
             geometry_msgs::msg::PointStamped r_center;
+            geometry_msgs::msg::PointStamped camera_origin_cam;
+            camera_origin_cam.header.stamp = msg->header.stamp;
+            camera_origin_cam.header.frame_id = camera_frame_;
+            camera_origin_cam.point.x = 0.0;
+            camera_origin_cam.point.y = 0.0;
+            camera_origin_cam.point.z = 0.0;
+
+            geometry_msgs::msg::PointStamped camera_origin;
             const bool r_ok = transformPointToTarget(r_cam, msg->header.stamp, r_center);
             const bool target_ok = transformPointToTarget(target_cam, msg->header.stamp, target_center);
+            const bool origin_ok = transformPointToTarget(camera_origin_cam, msg->header.stamp, camera_origin);
             if (target_ok&&r_ok) {
                 aiming_msg.r_x_3d = static_cast<float>(r_center.point.x);
                 aiming_msg.r_y_3d = static_cast<float>(r_center.point.y);
@@ -211,6 +220,17 @@ private:
                 aiming_msg.target_x_3d = static_cast<float>(target_center.point.x);
                 aiming_msg.target_y_3d = static_cast<float>(target_center.point.y);
                 aiming_msg.target_z_3d = static_cast<float>(target_center.point.z);
+                if (origin_ok) {
+                    const double axis_x = r_center.point.x - camera_origin.point.x;
+                    const double axis_y = r_center.point.y - camera_origin.point.y;
+                    const double axis_z = r_center.point.z - camera_origin.point.z;
+                    const double axis_norm = std::sqrt(axis_x * axis_x + axis_y * axis_y + axis_z * axis_z);
+                    if (axis_norm > 1e-6) {
+                        aiming_msg.axis_x_3d = static_cast<float>(axis_x / axis_norm);
+                        aiming_msg.axis_y_3d = static_cast<float>(axis_y / axis_norm);
+                        aiming_msg.axis_z_3d = static_cast<float>(axis_z / axis_norm);
+                    }
+                }
             }
         } else {
             RCLCPP_WARN_THROTTLE(
@@ -317,6 +337,13 @@ private:
         aiming_msg.r_x_3d = 0.0f;
         aiming_msg.r_y_3d = 0.0f;
         aiming_msg.r_z_3d = 0.0f;
+        aiming_msg.r_cam_x_3d = 0.0f;
+        aiming_msg.r_cam_y_3d = 0.0f;
+        aiming_msg.r_cam_z_3d = 0.0f;
+        aiming_msg.axis_x_3d = 0.0f;
+        aiming_msg.axis_y_3d = 0.0f;
+        aiming_msg.axis_z_3d = 0.0f;
+        aiming_msg.depth = 0.0f;
         aiming_msg.target_x_3d = 0.0f;
         aiming_msg.target_y_3d = 0.0f;
         aiming_msg.target_z_3d = 0.0f;

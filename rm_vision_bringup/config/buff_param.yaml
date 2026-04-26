@@ -73,8 +73,7 @@ buff_solver_node:
 
     # 坐标系名称
     frames:
-      odom: "odom"                      # 输入目标坐标的参考系
-      gimbal: "gimbal_yaw_link"         # 云台 yaw 关节坐标系（枪口 +X，Z 向上）
+      target: "odom"
 
     # 能量机关物理旋转半径（米），与 predictor 中的 arm_length 保持一致
     physical_radius: 0.75

@@ -98,3 +98,8 @@ onnxruntime下载完成之后配置环境变量cmake就能找到了
 
 ```ros2 launch foxglove_bridge foxglove_bridge_launch.xml```
 
+# Debug方案
+
+查看r标odom坐标系下坐标 随着云台晃动可以说明 tf的链路没有问题
+
+

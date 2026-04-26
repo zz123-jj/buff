@@ -28,11 +28,10 @@ public:
         : Node("buff_solver_node", options)
     {
         // ---------- 参数声明 ----------
-        this->declare_parameter<std::string>("frames.odom", "odom");
-        this->declare_parameter<std::string>("frames.gimbal", "gimbal_link");
+        this->declare_parameter<std::string>("frames.target", "odom");
         this->declare_parameter<double>("ballistic.bullet_speed", 23.8);
         this->declare_parameter<double>("ballistic.shoot_delay", 0.05);
-        this->declare_parameter<double>("physical_radius", 0.75); // 这个在 YAML 里没嵌套，保持原样
+        this->declare_parameter<double>("physical_radius", 0.75);
         this->declare_parameter<double>("ballistic.gravity", 9.81);
         this->declare_parameter<double>("ballistic.air_k", 0.001);
         this->declare_parameter<double>("ballistic.converge_thresh", 0.002);
@@ -42,8 +41,7 @@ public:
         this->declare_parameter<double>("stop_error", 0.001);
 
 // 读取参数也要对应加上前缀
-        odom_frame_      = this->get_parameter("frames.odom").as_string();
-        gimbal_frame_    = this->get_parameter("frames.gimbal").as_string();
+        target_frame_    = this->get_parameter("frames.target").as_string();
         bullet_speed_    = this->get_parameter("ballistic.bullet_speed").as_double();
         shoot_delay_     = this->get_parameter("ballistic.shoot_delay").as_double();
         physical_radius_ = this->get_parameter("physical_radius").as_double();
@@ -61,11 +59,14 @@ public:
         // ---------- 订阅与发布 ----------
         aiming_sub_ = this->create_subscription<buff_interfaces::msg::BuffAimingData>(
             "/buff/aiming_data", rclcpp::SensorDataQoS(),
-            std::bind(&BuffSolver::aimingCallback, this, std::placeholders::_1));
-
+            [this](const buff_interfaces::msg::BuffAimingData::SharedPtr msg) {
+                this->aimingCallback(msg);
+            });
         joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
             "/joint_states", rclcpp::SensorDataQoS(),
-            std::bind(&BuffSolver::jointCallback, this, std::placeholders::_1));
+            [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+                this->jointCallback(msg);
+            });
 
         autoaim_pub_ = this->create_publisher<gary_msgs::msg::AutoAIM>(
             "/autoaim/target", rclcpp::SensorDataQoS());
@@ -79,9 +80,43 @@ public:
 private:
     // ---------- 回调：保存当前关节角度 ----------
     void jointCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
+        bool has_yaw = false;
+        bool has_pitch = false;
+        double yaw = 0.0;
+        double pitch = 0.0;
+
+        if (msg->position.size() < msg->name.size()) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 1000,
+                "JointState position size (%zu) is smaller than name size (%zu).",
+                msg->position.size(), msg->name.size());
+        }
+
+        for (size_t i = 0; i < msg->name.size(); ++i) {
+            if (i >= msg->position.size()) {
+                break;
+            }
+
+            if (msg->name[i] == "yaw_joint") {
+                yaw = msg->position[i];
+                has_yaw = true;
+            } else if (msg->name[i] == "pitch_joint") {
+                pitch = msg->position[i];
+                has_pitch = true;
+            }
+        }
+
+        if (!has_yaw || !has_pitch) {
+            current_joint_msg_.reset();
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 1000,
+                "JointState missing yaw_joint or pitch_joint.");
+            return;
+        }
+
         current_joint_msg_ = msg;
-        current_yaw= msg->position[0];  
-        current_pitch = msg->position[1]; 
+        current_yaw = yaw;
+        current_pitch = pitch;
     }
 
     // ---------- 主回调 ----------
@@ -98,8 +133,8 @@ private:
         double msg_latency = (this->now() - msg_stamp).seconds();
         if (msg_latency < 0.0) msg_latency = 0.0;
 
-        // 初始飞行时间估计（基于当前目标位置和子弹速度）
-        double t_fly = std::max(std::hypot( msg->r_x_3d, msg->r_y_3d ) / bullet_speed_, 0.05);
+         // 初始飞行时间估计（基于当前目标位置和子弹速度）
+        double t_fly = std::max(std::hypot( msg->target_x_3d, msg->target_y_3d ) / bullet_speed_, 0.05);
 
         // ---------- 弹道迭代 ----------
         BallisticResult final_result{0.0, t_fly};
@@ -109,31 +144,31 @@ private:
         bool converged = false;
 
         for (int iter = 0; iter < max_iteration_; ++iter) {
-            // 总预测时间 = 消息延迟 + 飞行时间 + 发射延迟
-            double predict_delay = msg_latency + t_fly + shoot_delay_ ;
-            
-            geometry_msgs::msg::Point pred_gimbal = predictTargetPosition(*msg, predict_delay, this->get_clock());
-           
-            double distance_xy = std::hypot(pred_gimbal.x, pred_gimbal.y);
-            double distance_z  = pred_gimbal.z;
+        // 1. 利用当前的 t_fly 计算预测延迟
+        double predict_delay = msg_latency + t_fly + shoot_delay_;
 
-            // 弹道解算（仅涉及水平距离与高度差）
-            BallisticResult res = solveBallistic(distance_xy, distance_z);
+        // 2. 预测目标在那时在哪
+        geometry_msgs::msg::Point pred_odom = predictTargetPosition(*msg, predict_delay);
 
-            // 检查飞行时间是否收敛
-            if (std::abs(t_fly - res.t_fly) < converge_thresh_) {
-                converged = true;
-                break;
-            }
+        // 3. 计算弹道
+        double distance_xy = std::hypot(pred_odom.x, pred_odom.y);
+        BallisticResult res = solveBallistic(distance_xy, pred_odom.z);
 
-            final_result = res;
-            t_fly = res.t_fly;
-            final_pitch = - res.pitch;
-            //final_pitch = - std::atan2(pred_gimbal.z, std::hypot(pred_gimbal.x, pred_gimbal.y));
-            final_yaw = std::atan2(pred_gimbal.y, pred_gimbal.x);
-            distance_3d = std::hypot(distance_xy, distance_z);
+        // 4. 更新最终结果
+        final_result = res;
+        final_pitch = -res.pitch;
+        final_yaw = std::atan2(pred_odom.y, pred_odom.x);
+        distance_3d = std::hypot(distance_xy, pred_odom.z);
+
+        // 5. 检查是否收敛
+        if (std::abs(t_fly - res.t_fly) < converge_thresh_) {
+            converged = true;
+            break;
         }
 
+        // 6.把算出来的实际飞行时间传给下一轮，进行更精确的预测
+        t_fly = res.t_fly;
+    }
         if (!converged) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                 "Ballistic iteration did not converge, using last result.");
@@ -148,8 +183,8 @@ private:
         autoaim_msg->pitch = pitch_diff;
         autoaim_msg->target_distance = distance_3d;
         autoaim_msg->header.stamp = this->now();
-        autoaim_msg->header.frame_id = gimbal_frame_;
-        autoaim_msg->shoot_command = 1;   
+        autoaim_msg->header.frame_id = target_frame_;
+        autoaim_msg->shoot_command = 1;
         autoaim_pub_->publish(std::move(autoaim_msg));
 
         // 调试信息
@@ -157,7 +192,6 @@ private:
             auto debug_msg = gary_msgs::msg::AutoAimDebug();
             debug_msg.plan_yaw   = final_yaw;
             debug_msg.plan_pitch = final_pitch;
-            debug_msg.yaw_diff   = final_yaw - current_yaw;
             debug_pub_->publish(debug_msg);
         }
     }
@@ -169,14 +203,14 @@ private:
         msg->pitch = 0.0;
         msg->target_distance = 0.0;
         msg->header.stamp = this->now();
-        msg->header.frame_id = gimbal_frame_;
+        msg->header.frame_id = target_frame_;
         autoaim_pub_->publish(std::move(msg));
     }
 
 
     geometry_msgs::msg::Point predictTargetPosition(
-        const buff_interfaces::msg::BuffAimingData& msg, double delta_t, std::shared_ptr<rclcpp::Clock> clock) {
-        
+        const buff_interfaces::msg::BuffAimingData& msg, double delta_t) {
+
         double delta_theta = 0.0;
         const double eps = 1e-6;
 
@@ -188,19 +222,18 @@ private:
             double B = msg.sin_b;
 
             if (std::abs(omega) > eps && A > eps) {
-                auto now = clock->now();
                 double t0 = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 - msg.fit_start_time_sec;
                 double t_pred = delta_t + msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 - msg.fit_start_time_sec;
                 // 角度增量积分：∫[t0, t_pred] (A sin(ωτ+φ) + B) dτ
-                delta_theta = B * delta_t 
+                delta_theta = msg.spin_direction * B * delta_t
                     - (A / omega) * (std::cos(omega * t_pred + phi) - std::cos(omega * t0 + phi));
             } else {
                 // 参数无效时退化为匀速
-                delta_theta = B * delta_t;
+                delta_theta = msg.spin_direction * B * delta_t;
             }
         } else if (msg.is_bigbuff == -1) {
             // ---------- 小符：匀速，pi/3 弧度每秒
-            delta_theta = M_PI / 3 * delta_t;
+            delta_theta = msg.spin_direction * M_PI / 3 * delta_t;
         } else {
             delta_theta = 0.0;
         }
@@ -210,30 +243,39 @@ private:
             // 2. 构建当前目标的 3D 向量
             Eigen::Vector3d current_target(msg.target_x_3d, msg.target_y_3d, msg.target_z_3d);
 
-            // 3. 计算旋转轴（法向量）
-            // 在单目视觉下，我们近似认为能量机关的盘面垂直于相机到R标的连线
-            // 因此旋转轴就是从原点指向 R 标的单位向量
-            Eigen::Vector3d normal_axis = r_center.normalized();
+            // 3. 计算旋转轴（法向量）：target_frame下的“相机光心 -> R标”单位向量
+            Eigen::Vector3d normal_axis(msg.axis_x_3d, msg.axis_y_3d, msg.axis_z_3d);
+            if (normal_axis.norm() <= eps) {
+                normal_axis = r_center;
+            }
+            if (normal_axis.norm() <= eps) {
+                geometry_msgs::msg::Point p;
+                p.x = current_target.x();
+                p.y = current_target.y();
+                p.z = current_target.z();
+                return p;
+            }
+            normal_axis.normalize();
 
             // 4. 构建“半径向量”（从 R 标指向当前目标的向量）
-Eigen::Vector3d radius_vector = current_target - r_center;
+            Eigen::Vector3d radius_vector = current_target - r_center;
 
-// 5. 构造 3D 旋转器 (基于右手螺旋定则)
-// 注意：如果实车测试发现预测点沿着反方向跑了，只需要把 delta_theta 改成 -delta_theta 即可
-Eigen::AngleAxisd rotation(delta_theta, normal_axis);
+            // 5. 构造 3D 旋转器 (基于右手螺旋定则)
+            // 注意：如果实车测试发现预测点沿着反方向跑了，只需要把 delta_theta 改成 -delta_theta 即可
+            Eigen::AngleAxisd rotation(delta_theta, normal_axis);
 
-// 6. 对半径向量进行 3D 旋转
-Eigen::Vector3d pred_radius_vector = rotation * radius_vector;
+            // 6. 对半径向量进行 3D 旋转
+            Eigen::Vector3d pred_radius_vector = rotation * radius_vector;
 
-// 7. 计算最终的 3D 预测坐标 = R心坐标 + 旋转后的半径向量
-Eigen::Vector3d pred_target = r_center + pred_radius_vector;
+            // 7. 计算最终的 3D 预测坐标 = R心坐标 + 旋转后的半径向量
+            Eigen::Vector3d pred_target = r_center + pred_radius_vector;
 
-geometry_msgs::msg::Point p;
-p.x = pred_target.x();
-p.y = pred_target.y();
-p.z = pred_target.z();
-        return p;
-    }
+            geometry_msgs::msg::Point p;
+            p.x = pred_target.x();
+            p.y = pred_target.y();
+            p.z = pred_target.z();
+                    return p;
+                }
 
     // ---------- 弹道解算（考虑重力与空气阻力） ----------
     BallisticResult solveBallistic(double distance_xy, double distance_z) {
@@ -293,7 +335,7 @@ p.z = pred_target.z();
 
     sensor_msgs::msg::JointState::SharedPtr current_joint_msg_;
 
-    std::string odom_frame_, gimbal_frame_;
+    std::string target_frame_;
     double current_yaw = 0.0;
     double current_pitch = 0.0;
     double bullet_speed_, shoot_delay_, physical_radius_;

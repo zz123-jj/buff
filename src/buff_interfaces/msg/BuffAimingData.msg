@@ -15,6 +15,10 @@ float32 r_cam_x_3d         #camera系 R标 X
 float32 r_cam_y_3d         #camera系 R标 Y
 float32 r_cam_z_3d         #camera系 R标 Z
 
+float32 axis_x_3d          #target_frame下 camera optical center -> R 的单位旋转轴 X
+float32 axis_y_3d          #target_frame下 camera optical center -> R 的单位旋转轴 Y
+float32 axis_z_3d          #target_frame下 camera optical center -> R 的单位旋转轴 Z
+
 float32 depth
 
 float32 target_x_3d            # 目标 X
