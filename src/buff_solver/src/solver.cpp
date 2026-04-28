@@ -9,6 +9,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <Eigen/Dense>
@@ -39,6 +40,10 @@ public:
         this->declare_parameter<bool>("aiming.debug", true);
         this->declare_parameter<int>("max_iteration", 5);
         this->declare_parameter<double>("stop_error", 0.001);
+        this->declare_parameter<double>("gimbal.command_limit", 0.1);
+        this->declare_parameter<double>("gimbal.yaw_command_rate_limit", 0.8);
+        this->declare_parameter<double>("gimbal.pitch_command_rate_limit", 0.8);
+        this->declare_parameter<double>("gimbal.max_command_dt", 0.05);
 
 // 读取参数也要对应加上前缀
         target_frame_    = this->get_parameter("frames.target").as_string();
@@ -52,6 +57,12 @@ public:
         debug_           = this->get_parameter("aiming.debug").as_bool();
         max_iteration_   = this->get_parameter("max_iteration").as_int();
         stop_error_      = this->get_parameter("stop_error").as_double();
+        command_limit_ = std::max(0.0, this->get_parameter("gimbal.command_limit").as_double());
+        yaw_command_rate_limit_ =
+            std::max(0.0, this->get_parameter("gimbal.yaw_command_rate_limit").as_double());
+        pitch_command_rate_limit_ =
+            std::max(0.0, this->get_parameter("gimbal.pitch_command_rate_limit").as_double());
+        max_command_dt_ = std::max(0.0, this->get_parameter("gimbal.max_command_dt").as_double());
 
         RCLCPP_INFO(this->get_logger(),
             "BuffSolver started. bullet=%.2f m/s, radius=%.2f m", bullet_speed_, physical_radius_);
@@ -121,11 +132,9 @@ private:
 
     // ---------- 主回调 ----------
     void aimingCallback(const buff_interfaces::msg::BuffAimingData::SharedPtr msg) {
-        auto autoaim_msg = std::make_unique<gary_msgs::msg::AutoAIM>();
-
-        // 若无关节状态数据和未追踪，仍发布零指令
+        // 若无关节状态数据或未追踪，不发布控制消息，并重置限幅状态。
         if (!current_joint_msg_||!msg->is_tracking) {
-            publishZeroCommand(std::move(autoaim_msg));
+            resetCommandLimiter();
             return;
         }
         // 计算消息延迟
@@ -145,7 +154,7 @@ private:
 
         for (int iter = 0; iter < max_iteration_; ++iter) {
         // 1. 利用当前的 t_fly 计算预测延迟
-        double predict_delay = msg_latency + t_fly + shoot_delay_;
+        double predict_delay = msg_latency + t_fly + shoot_delay_+0.04;
 
         // 2. 预测目标在那时在哪
         geometry_msgs::msg::Point pred_odom = predictTargetPosition(*msg, predict_delay);
@@ -177,15 +186,37 @@ private:
         // 计算相对角度差
         double pitch_diff = -(final_pitch - current_pitch);
         double yaw_diff   = final_yaw - current_yaw;
+        const rclcpp::Time publish_time = this->now();
+        double yaw_cmd = std::clamp(yaw_diff, -command_limit_, command_limit_);
+        double pitch_cmd = std::clamp(pitch_diff, -command_limit_, command_limit_);
+
+        if (has_last_command_) {
+            double dt = (publish_time - last_command_time_).seconds();
+            if (!std::isfinite(dt) || dt < 0.0) {
+                dt = 0.0;
+            }
+            if (max_command_dt_ > 0.0) {
+                dt = std::min(dt, max_command_dt_);
+            }
+
+            yaw_cmd = limitCommandRate(yaw_cmd, last_yaw_cmd_, yaw_command_rate_limit_, dt);
+            pitch_cmd = limitCommandRate(pitch_cmd, last_pitch_cmd_, pitch_command_rate_limit_, dt);
+        }
 
         // 发布自瞄指令
-        autoaim_msg->yaw   = yaw_diff;
-        autoaim_msg->pitch = pitch_diff;
+        auto autoaim_msg = std::make_unique<gary_msgs::msg::AutoAIM>();
+        autoaim_msg->yaw   = yaw_cmd;
+        autoaim_msg->pitch = pitch_cmd;
         autoaim_msg->target_distance = distance_3d;
-        autoaim_msg->header.stamp = this->now();
+        autoaim_msg->header.stamp = publish_time;
         autoaim_msg->header.frame_id = target_frame_;
         autoaim_msg->shoot_command = 1;
         autoaim_pub_->publish(std::move(autoaim_msg));
+
+        last_yaw_cmd_ = yaw_cmd;
+        last_pitch_cmd_ = pitch_cmd;
+        last_command_time_ = publish_time;
+        has_last_command_ = true;
 
         // 调试信息
         if (debug_) {
@@ -197,14 +228,15 @@ private:
     }
 
 
-    // ---------- 发布零指令（丢失目标时） ----------
-    void publishZeroCommand(std::unique_ptr<gary_msgs::msg::AutoAIM> msg) {
-        msg->yaw = 0.0;
-        msg->pitch = 0.0;
-        msg->target_distance = 0.0;
-        msg->header.stamp = this->now();
-        msg->header.frame_id = target_frame_;
-        autoaim_pub_->publish(std::move(msg));
+    double limitCommandRate(double target, double last, double rate_limit, double dt) const {
+        const double max_step = rate_limit * dt;
+        return std::clamp(target, last - max_step, last + max_step);
+    }
+
+    void resetCommandLimiter() {
+        has_last_command_ = false;
+        last_yaw_cmd_ = 0.0;
+        last_pitch_cmd_ = 0.0;
     }
 
 
@@ -340,8 +372,16 @@ private:
     double current_pitch = 0.0;
     double bullet_speed_, shoot_delay_, physical_radius_;
     double gravity_, air_k_, converge_thresh_, sim_dt_, stop_error_;
+    double command_limit_ = 0.1;
+    double yaw_command_rate_limit_ = 0.8;
+    double pitch_command_rate_limit_ = 0.8;
+    double max_command_dt_ = 0.05;
+    double last_yaw_cmd_ = 0.0;
+    double last_pitch_cmd_ = 0.0;
+    rclcpp::Time last_command_time_{0, 0, RCL_ROS_TIME};
     int max_iteration_;
     bool debug_;
+    bool has_last_command_ = false;
 };
 
 

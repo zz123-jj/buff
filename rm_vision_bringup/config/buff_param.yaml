@@ -8,7 +8,7 @@ buff_detector_node:
   ros__parameters:
       model_path: model/Fan.onnx
       use_cuda: false
-      confidence_threshold: 0.88
+      confidence_threshold: 0.20
       iou_threshold: 0.5
       debug_mode: true
       inside_shade_rate: 0.7
@@ -17,7 +17,7 @@ buff_detector_node:
         lower: [0, 40, 220]
         upper: [70, 255, 255]
       dilate_kernel_size: 7
-      max_lost_frame: 30
+      max_lost_frame: 130
 
 
 
@@ -70,6 +70,18 @@ buff_solver_node:
     aiming:
       # 是否发布调试话题（/autoaim/debug）
       debug: true
+
+    # 云台输出限幅参数
+    gimbal:
+      # 单帧 yaw/pitch 相对角度命令最大值（rad）
+      command_limit: 0.1
+
+      # yaw/pitch 命令变化率限制（rad/s），值越小越平滑
+      yaw_command_rate_limit: 0.8
+      pitch_command_rate_limit: 0.8
+
+      # 限制参与导数计算的最大 dt，避免长时间断流后第一帧跳太大（秒）
+      max_command_dt: 0.001
 
     # 坐标系名称
     frames:

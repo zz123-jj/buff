@@ -454,6 +454,13 @@ bool BuffDetector::detect_by_yolo(cv::Mat& frame)
             R_detections.begin(), R_detections.end(), [](const auto& a, const auto& b) { return a.second < b.second; }
         );
         current_R_box_ = BBox(best_R->first);
+
+        RCLCPP_INFO(
+            rclcpp::get_logger("BuffDetector"),
+            "YOLO target detected: fan confidence=%.3f, R confidence=%.3f",
+            best_fan->second,
+            best_R->second
+        );
         
         return true;
     }
@@ -678,11 +685,22 @@ bool BuffDetector::update_fan_blades(cv::Mat& image)
             if(last_target.id != lighting_blade_list[0].id && lighting_blade_list.size() == 1){
                 blade_list_[last_target.id].state = FanBladeState::unlighted;
                 blade_list_[lighting_blade_list[0].id].state = FanBladeState::target; 
-        }else{
+            }else{
             // 亮起个数不变：保持上一帧状态，只更新框位置
             for (const auto& fan_blade : lighting_blade_list){
                     blade_list_[fan_blade.id].box = fan_blade.box;}}
-                }else{
+        }else if (static_cast<int>(lighting_blade_list.size()) < lighted_blade_num_)
+        {
+            for(auto &fan_blade : blade_list_){
+                if(fan_blade.state == FanBladeState::shotted){
+                    fan_blade.state = FanBladeState::unlighted;
+                }
+            }
+             if (config_.debug_mode) {
+                RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "find 2 unexpected lighting blades, reset shotted blades to unlighted");
+             }
+        }
+        else{
              if (config_.debug_mode) {
                 RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Unexpected blade count: %zu", lighting_blade_list.size());}
             return false;
@@ -745,7 +763,7 @@ void BuffDetector::reset_spin_direction_state()
 
 void BuffDetector::update_spin_direction_by_target_id()
 {
-    if (buff_type_ != BuffType::big_buff || target_blades_.empty()) {
+    if (target_blades_.empty()) {
         reset_spin_direction_state();
         return;
     }
@@ -773,7 +791,7 @@ void BuffDetector::update_spin_direction_by_target_id()
         return;
     }
 
-    const uint8_t candidate_direction = angle_diff > 0.0f ? 1 : -1;
+    const int8_t candidate_direction = angle_diff > 0.0f ? 1 : -1;
 
     if (candidate_direction == pending_spin_direction_) {
         ++pending_direction_count_;

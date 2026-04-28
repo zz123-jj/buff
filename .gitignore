@@ -3,3 +3,6 @@
 /gary_msgs-main
 /log
 *.csv
+.cache/
+.vscode/
+*.code   

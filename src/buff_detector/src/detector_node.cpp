@@ -130,6 +130,7 @@ private:
                 RCLCPP_INFO(this->get_logger(), "Detector initialized.");
             }else{
             RCLCPP_INFO(this->get_logger(),"Failed to initialize detector.");
+            return;
         }}
 
         // 更新检测
@@ -139,6 +140,7 @@ private:
             {
                 is_tracking_ = false;
                 RCLCPP_WARN(this->get_logger(), "Detector lost target, re-initialization required.");
+                return;
             }
 
         // 获取中心点坐标
@@ -146,16 +148,15 @@ private:
         cv::Point2f r_center = detector_->get_current_R_box().get_center_2f();
      // 发布目标信息
         auto target_msg = buff_interfaces::msg::BuffTarget();
-        target_msg.is_tracking = is_tracking_;
-        if(!is_tracking_){set_defaultBuffTarget(target_msg);}
-        else{target_msg.header.stamp = frame_stamp;
+        target_msg.is_tracking = true;
+        target_msg.header.stamp = frame_stamp;
         target_msg.is_bigbuff = (detector_->get_buff_type() == BuffType::big_buff ? 1 : -1); // 获取当前buff模式
         target_msg.spin_direction = detector_->get_spin_direction();
         target_msg.target_center_x = fan_center.x;
         target_msg.target_center_y = fan_center.y;
         target_msg.r_center_x = r_center.x;
         target_msg.r_center_y = r_center.y;
-        target_msg.radius = detector_->get_radius();} // 获取能量机关半径
+        target_msg.radius = detector_->get_radius(); // 获取能量机关半径
         target_pub_->publish(std::move(target_msg));
         }
         // 显示调试信息
@@ -239,5 +240,4 @@ int main(int argc, char** argv)
 #include "rclcpp_components/register_node_macro.hpp"
 
 RCLCPP_COMPONENTS_REGISTER_NODE(BuffDetectorNode)
-
 
