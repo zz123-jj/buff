@@ -1,0 +1,78 @@
+buff_detector:
+  ros__parameters:
+    repository_root: "/home/nuc01/buff"
+    image_topic: "/image_raw"
+    image_reliable: false
+    detection_topic: "/buff/detection"
+    debug: true
+    debug_image_topic: "/buff/debug_img"
+    lock_target: true
+    lock_max_distance_px: 180.0
+    switch_confidence_margin: 0.20
+    lock_lost_threshold: 5
+    model_path: "src/rm_buff_detector/model/yolo11_buff_int8.xml"
+    confidence_threshold: 0.4
+
+buff_solver:
+  ros__parameters:
+    detection_topic: "/buff/detection"
+    pose_topic: "/buff/pose"
+    camera_info_topic: "/camera_info"
+    world_frame: "odom"
+    camera_frame: "camera_optical_frame"
+    tf_timeout_sec: 0.02
+
+    camera_matrix: [1851.7070167840545, 0.0, 721.12585328714192,
+                    0.0, 1851.8175594364079, 571.69879709276688,
+                    0.0, 0.0, 1.0]
+    distort_coeffs: [-0.093662536083526302, 0.18945726820633155,
+                     -0.00040424349861928674, -0.0040568403852123142, 0.0]
+
+buff_aimer:
+  ros__parameters:
+    target_topic: "/buff/target"
+    command_topic: "/autoaim/target"
+    world_frame: "odom"
+    gimbal_frame: "gimbal_link"
+    tf_timeout_sec: 0.02
+
+    bullet_speed: 24.0
+    yaw_offset_deg: -2.0
+    pitch_offset_deg: 0.0
+    fire_gap_time: 0.52
+    predict_time: 0.10
+
+buff_tracker:
+  ros__parameters:
+    pose_topic: "/buff/pose"
+    target_topic: "/buff/target"
+
+    buff_mode: "big"
+    lost_threshold: 6
+
+    # EKF covariance parameters. Lists are diagonal entries.
+    center_r: [0.01, 0.01, 0.5, 0.1]       # R_yaw, R_pitch, R_distance, roll
+    blade_r: [0.01, 0.01, 0.5]             # blade yaw, pitch, distance
+    small_initial_p: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 0.01]
+    big_initial_p: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 100.0, 10.0, 10.0, 400.0]
+
+    small_speed: 1.0471975512
+    small_q_yaw_acc: 0.001
+
+    big_speed_bias: 2.09
+    big_initial_a: 0.9125
+    big_initial_w: 1.942
+    big_initial_phi: 0.0
+    big_q_yaw_acc: 0.9
+    big_q_roll: 0.09
+    big_q_speed: 0.5
+    big_q_phi: 1.0
+
+    # Online RANSAC sine speed fitter: v(t)=A*sin(omega*t+phi)+C.
+    fitter_max_iterations: 100
+    fitter_threshold: 0.5
+    fitter_min_omega: 1.884
+    fitter_max_omega: 2.0
+    fitter_min_speed: 0.0
+    fitter_max_speed: 2.1
+    fitter_min_inliers: 3

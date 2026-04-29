@@ -1,0 +1,58 @@
+camera_publisher:
+  ros__parameters:
+    # NOTE: 运行时开关
+    is_rotate: true
+    rotate_type: 1
+    # ROTATE_90_CLOCKWISE = 0, //!<Rotate 90 degrees clockwise
+    # ROTATE_180 = 1, //!<Rotate 180 degrees clockwise
+    # ROTATE_90_COUNTERCLOCKWISE = 2, //!<Rotate 270 degrees clockwise
+    show_params: true
+
+    # NOTE: 设备 & 采集
+    device:
+      serial: "FDE25070178"
+
+    sensor:
+      width: 1920
+      height: 1200
+    roi:
+      width: 1920
+      height: 1200
+
+    binning: 1
+    fps: 168.0
+    exposure:  10000
+    # gain: 22 #red
+    gain: 5 #blue
+    # NOTE: 话题 & 帧名
+    camera_topic: "image_raw"
+    frame_id: "camera_optical_frame"
+
+    camera_info_topic: "camera_info"
+
+    # NOTE: 定时器周期（毫秒）
+    timers:
+      info_ms: 10
+
+    # NOTE: 相机掉线重连
+    reconnect:
+      enable: true
+      frame_timeout_ms: 500
+      retry_interval_ms: 1000
+      startup_retry_count: 5
+      watchdog_ms: 200
+
+    # NOTE :calibration
+    calibration:
+      # k: [1410.8453, 0.0000, 960.0, 0.0000, 1411.2920, 600.0, 0.0000, 0.0000, 1.0000] # 8mm
+      # d: [-0.082353, 0.149798, 0.000782, -0.000546, -0.055236] # 8mm
+      
+      k: [2048.78, 0.0000, 960.0, 0.0000, 2048.78, 600.0, 0.0000, 0.0000, 1.0000] # 12mm
+      d: [0.0, 0.0, 0.0, 0.0, 0.0] # 12mm
+      
+      # k: [4343.2824, 0.0000, 880, 0.0000, 4346.3878, 610.5457, 0.0000, 0.0000, 1.0000] # 25mm
+      # d: [-0.169581, 1.362345, -0.000436, -0.000314, -32.306094] # 25mm
+      # k: [4266.1, 0.0000, 960.0, 0.0000, 4266.1, 600.0, 0.0000, 0.0000, 1.0000] # 25mm
+      # d: [0.0, 0.0, 0.0, 0.0, 0.0] # 25mm
+      model: "plumb_bob"
+      compute_rectified_p: true

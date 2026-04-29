@@ -1,0 +1,15 @@
+std_msgs/Header header
+bool tracked
+string mode
+geometry_msgs/Vector3 center_ypd
+geometry_msgs/Vector3 buff_ypr
+geometry_msgs/Point aim_point_world
+float64 model_time
+int8 direction
+float64 angular_speed
+float64 speed_a
+float64 speed_w
+float64 speed_phi
+float64 speed_c
+float64[10] state
+uint8 state_dimension
