@@ -341,10 +341,12 @@ bool DHCamera::init(int roi_x, int roi_y, int roi_w, int roi_h, float exposure, 
         UPDB_FATAL(GXSetEnum(g_hDevice, GX_ENUM_GAIN_SELECTOR, GX_GAIN_SELECTOR_ALL),
                    "GainSelector");
 
-        // Hardware image flip for 180° rotation (zero CPU cost)
-        if (rotate_type == 1) {
-            UPDB_SOFT(GXSetBool(g_hDevice, GX_BOOL_REVERSE_X, true), "ReverseX");
-            UPDB_SOFT(GXSetBool(g_hDevice, GX_BOOL_REVERSE_Y, true), "ReverseY");
+        // Hardware image flip for 180° rotation (zero CPU cost). Always write both flags so
+        // a previous run cannot leave the camera reversed after rotation is disabled.
+        const bool enable_180_flip = rotate_type == 1;
+        UPDB_SOFT(GXSetBool(g_hDevice, GX_BOOL_REVERSE_X, enable_180_flip), "ReverseX");
+        UPDB_SOFT(GXSetBool(g_hDevice, GX_BOOL_REVERSE_Y, enable_180_flip), "ReverseY");
+        if (enable_180_flip) {
             LOG(INFO) << "Hardware 180° flip enabled (ReverseX + ReverseY)";
         }
 

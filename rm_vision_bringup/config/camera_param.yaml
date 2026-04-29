@@ -1,7 +1,7 @@
 camera_publisher:
   ros__parameters:
     # NOTE: 运行时开关
-    is_rotate: true
+    is_rotate: false
     rotate_type: 1
     # ROTATE_90_CLOCKWISE = 0, //!<Rotate 90 degrees clockwise
     # ROTATE_180 = 1, //!<Rotate 180 degrees clockwise
@@ -10,7 +10,7 @@ camera_publisher:
 
     # NOTE: 设备 & 采集
     device:
-      serial: "FDE25070178"
+      serial: "FDE25110053"
 
     sensor:
       width: 1920

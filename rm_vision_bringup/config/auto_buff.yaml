@@ -1,6 +1,6 @@
 buff_detector:
   ros__parameters:
-    repository_root: "/home/nuc01/buff"
+    repository_root: "/home/nuc04/buff"
     image_topic: "/image_raw"
     image_reliable: false
     detection_topic: "/buff/detection"
@@ -33,7 +33,7 @@ buff_aimer:
     target_topic: "/buff/target"
     command_topic: "/autoaim/target"
     world_frame: "odom"
-    gimbal_frame: "gimbal_link"
+    gimbal_frame: "bullet_muzzle_link"
     tf_timeout_sec: 0.02
 
     bullet_speed: 24.0
@@ -47,7 +47,7 @@ buff_tracker:
     pose_topic: "/buff/pose"
     target_topic: "/buff/target"
 
-    buff_mode: "big"
+    buff_mode: "small"
     lost_threshold: 6
 
     # EKF covariance parameters. Lists are diagonal entries.

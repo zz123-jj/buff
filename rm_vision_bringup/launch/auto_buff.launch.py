@@ -1,4 +1,6 @@
 from launch import LaunchDescription
+from launch.substitutions import Command
+from launch_ros.actions import Node
 from launch_ros.actions import ComposableNodeContainer
 from launch_ros.descriptions import ComposableNode
 from launch_ros.substitutions import FindPackageShare
@@ -16,6 +18,26 @@ def generate_launch_description():
         "config",
         "camera_param.yaml",
     ])
+    gimbal_urdf = PathJoinSubstitution([
+        FindPackageShare("rm_gimbal_description"),
+        "urdf",
+        "rm_gimbal.urdf.xacro",
+    ])
+    robot_state_publisher = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        name="robot_state_publisher",
+        parameters=[{
+            "robot_description": Command(["xacro ", gimbal_urdf]),
+        }],
+        output="screen",
+    )
+    joint_tf_publisher = Node(
+        package="gimbal_tf_publisher",
+        executable="joint_tf_publisher",
+        name="joint_tf_publisher",
+        output="screen",
+    )
     container = ComposableNodeContainer(
         name="rm_vision_container",
         namespace="",
@@ -52,14 +74,9 @@ def generate_launch_description():
                 name="camera_publisher",
                 parameters=[camera_config],
             ),
-            ComposableNode(
-                package="joint_tf_publisher",
-                plugin="JointTFPublisher",
-                name="joint_tf_publisher",
-            ),
 
         ],
         output="screen",
     )
 
-    return LaunchDescription([container])
+    return LaunchDescription([robot_state_publisher, joint_tf_publisher, container])

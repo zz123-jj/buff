@@ -67,7 +67,7 @@ private:
   void target_callback(const rm_vision_interfaces::msg::BuffTarget::ConstSharedPtr msg)
   {
     if (!msg->tracked) {
-      publish_safe(msg->header);
+      //publish_safe(msg->header);
       return;
     }
 
@@ -78,13 +78,13 @@ private:
       T_world_gimbal = transform_to_eigen(transform);
     } catch (const tf2::TransformException & e) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "TF lookup failed: %s", e.what());
-      publish_safe(msg->header);
+      //publish_safe(msg->header);
       return;
     }
 
     auto result = aim(*msg, seconds(now()), T_world_gimbal.translation());
     if (!result.control) {
-      publish_safe(msg->header);
+      //publish_safe(msg->header);
       return;
     }
 

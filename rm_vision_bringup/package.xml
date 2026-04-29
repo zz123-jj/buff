@@ -8,14 +8,17 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <exec_depend>joint_tf_publisher</exec_depend>
+  <exec_depend>gimbal_tf_publisher</exec_depend>
   <exec_depend>rclcpp_components</exec_depend>
+  <exec_depend>rm_gimbal_description</exec_depend>
   <exec_depend>rm_buff_aimer</exec_depend>
   <exec_depend>rm_buff_detector</exec_depend>
   <exec_depend>rm_buff_solver</exec_depend>
   <exec_depend>rm_buff_tracker</exec_depend>
   <exec_depend>rm_vision_interfaces</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>xacro</exec_depend>
   <export>
     <build_type>ament_cmake</build_type>
   </export>
