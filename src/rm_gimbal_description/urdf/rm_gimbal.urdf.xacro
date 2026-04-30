@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<robot name="rm_gimbal"
+  xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <xacro:arg name="camera_xyz" default="0.141 0.007 0.012" />
+  <xacro:arg name="camera_rpy" default="0 0 0" />
+  <xacro:arg name="muzzle_xyz" default="0 0 0" />
+  <xacro:arg name="muzzle_rpy" default="0 0 0" />
+
+  <link name="gimbal_pitch_link" />
+
+  <link name="camera_link" />
+
+  <joint name="camera_joint" type="fixed">
+    <origin xyz="$(arg camera_xyz)" rpy="$(arg camera_rpy)" />
+    <parent link="gimbal_pitch_link" />
+    <child link="camera_link" />
+    <axis xyz="0 0 0" />
+  </joint>
+
+  <link name="bullet_muzzle_link" />
+
+  <joint name="bullet_muzzle_joint" type="fixed">
+    <origin xyz="$(arg muzzle_xyz)" rpy="$(arg muzzle_rpy)" />
+    <parent link="gimbal_pitch_link" />
+    <child link="bullet_muzzle_link" />
+  </joint>
+
+  <link name="camera_optical_frame" />
+
+  <joint name="camera_optical_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}" />
+    <parent link="camera_link" />
+    <child link="camera_optical_frame" />
+  </joint>
+
+</robot>

@@ -1,8 +1,3 @@
-// ============================================================
-// 文件名: buff_aimer.cpp
-// 描述:   能量机关自瞄解算器（支持大小符，含弹道迭代）
-// ============================================================
-
 #include <ctime>
 #include <rclcpp/clock.hpp>
 #include <rclcpp/node.hpp>
@@ -28,7 +23,6 @@ public:
     explicit BuffAimer(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
         : Node("buff_aimer_node", options)
     {
-        // ---------- 参数声明 ----------
         this->declare_parameter<std::string>("frames.target", "odom");
         this->declare_parameter<double>("ballistic.bullet_speed", 23.8);
         this->declare_parameter<double>("ballistic.shoot_delay", 0.05);
@@ -41,7 +35,6 @@ public:
         this->declare_parameter<int>("max_iteration", 5);
         this->declare_parameter<double>("stop_error", 0.001);
 
-// 读取参数也要对应加上前缀
         target_frame_    = this->get_parameter("frames.target").as_string();
         bullet_speed_    = this->get_parameter("ballistic.bullet_speed").as_double();
         shoot_delay_     = this->get_parameter("ballistic.shoot_delay").as_double();
@@ -74,7 +67,6 @@ public:
     }
 
 private:
-    // ---------- 主回调 ----------
     void aimingCallback(const buff_interfaces::msg::BuffAimingData::SharedPtr msg) {
         if (!msg->is_tracking) {
             return;
@@ -114,8 +106,6 @@ private:
             converged = true;
             break;
         }
-
-        // 6.把算出来的实际飞行时间传给下一轮，进行更精确的预测
         t_fly = res.t_fly;
     }
         if (!converged) {
@@ -123,7 +113,6 @@ private:
                 "Ballistic iteration did not converge, using last result.");
         }
 
-        // 与 buff2 保持一致：直接发布 target_frame 下的绝对瞄准角，不再转换为云台相对控制量。
         const rclcpp::Time publish_time = this->now();
 
         // 发布自瞄指令
@@ -167,9 +156,10 @@ private:
             if (std::abs(omega) > eps && A > eps) {
                 double t0 = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 - msg.fit_start_time_sec;
                 double t_pred = delta_t + msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 - msg.fit_start_time_sec;
-                // 角度增量积分：∫[t0, t_pred] (A sin(ωτ+φ) + B) dτ
-                delta_theta = msg.spin_direction * B * delta_t
+                // 角速度拟合的是幅值，方向由 spin_direction 统一决定。
+                const double speed_integral = B * delta_t
                     - (A / omega) * (std::cos(omega * t_pred + phi) - std::cos(omega * t0 + phi));
+                delta_theta = msg.spin_direction * speed_integral;
             } else {
                 // 参数无效时退化为匀速
                 delta_theta = msg.spin_direction * B * delta_t;
@@ -204,7 +194,7 @@ private:
             Eigen::Vector3d radius_vector = current_target - r_center;
 
             // 5. 构造 3D 旋转器 (基于右手螺旋定则)
-            // 注意：如果实车测试发现预测点沿着反方向跑了，只需要把 delta_theta 改成 -delta_theta 即可
+            // delta_theta 已按 spin_direction 带符号，旋转方向遵循右手定则。
             Eigen::AngleAxisd rotation(delta_theta, normal_axis);
 
             // 6. 对半径向量进行 3D 旋转
