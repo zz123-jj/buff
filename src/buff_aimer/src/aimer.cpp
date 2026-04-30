@@ -7,11 +7,11 @@
 #include <rclcpp/clock.hpp>
 #include <rclcpp/node.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/joint_state.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <string>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 #include "buff_interfaces/msg/buff_aiming_data.hpp"
@@ -40,11 +40,6 @@ public:
         this->declare_parameter<bool>("aiming.debug", true);
         this->declare_parameter<int>("max_iteration", 5);
         this->declare_parameter<double>("stop_error", 0.001);
-        this->declare_parameter<double>("gimbal.command_limit", 0.1);
-        this->declare_parameter<double>("gimbal.yaw_command_rate_limit", 0.8);
-        this->declare_parameter<double>("gimbal.pitch_command_rate_limit", 0.8);
-        this->declare_parameter<double>("gimbal.max_command_dt", 0.05);
-        this->declare_parameter<bool>("gimbal.require_joint_states", false);
 
 // 读取参数也要对应加上前缀
         target_frame_    = this->get_parameter("frames.target").as_string();
@@ -58,13 +53,6 @@ public:
         debug_           = this->get_parameter("aiming.debug").as_bool();
         max_iteration_   = this->get_parameter("max_iteration").as_int();
         stop_error_      = this->get_parameter("stop_error").as_double();
-        command_limit_ = std::max(0.0, this->get_parameter("gimbal.command_limit").as_double());
-        yaw_command_rate_limit_ =
-            std::max(0.0, this->get_parameter("gimbal.yaw_command_rate_limit").as_double());
-        pitch_command_rate_limit_ =
-            std::max(0.0, this->get_parameter("gimbal.pitch_command_rate_limit").as_double());
-        max_command_dt_ = std::max(0.0, this->get_parameter("gimbal.max_command_dt").as_double());
-        require_joint_states_ = this->get_parameter("gimbal.require_joint_states").as_bool();
 
         RCLCPP_INFO(this->get_logger(),
             "BuffAimer started. bullet=%.2f m/s, radius=%.2f m", bullet_speed_, physical_radius_);
@@ -74,11 +62,6 @@ public:
             "/buff/aiming_data", rclcpp::SensorDataQoS(),
             [this](const buff_interfaces::msg::BuffAimingData::SharedPtr msg) {
                 this->aimingCallback(msg);
-            });
-        joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-            "/joint_states", rclcpp::SensorDataQoS(),
-            [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
-                this->jointCallback(msg);
             });
 
         autoaim_pub_ = this->create_publisher<gary_msgs::msg::AutoAIM>(
@@ -91,63 +74,10 @@ public:
     }
 
 private:
-    // ---------- 回调：保存当前关节角度 ----------
-    void jointCallback(const sensor_msgs::msg::JointState::SharedPtr msg) {
-        bool has_yaw = false;
-        bool has_pitch = false;
-        double yaw = 0.0;
-        double pitch = 0.0;
-
-        if (msg->position.size() < msg->name.size()) {
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 1000,
-                "JointState position size (%zu) is smaller than name size (%zu).",
-                msg->position.size(), msg->name.size());
-        }
-
-        for (size_t i = 0; i < msg->name.size(); ++i) {
-            if (i >= msg->position.size()) {
-                break;
-            }
-
-            if (msg->name[i] == "yaw_joint") {
-                yaw = msg->position[i];
-                has_yaw = true;
-            } else if (msg->name[i] == "pitch_joint") {
-                pitch = msg->position[i];
-                has_pitch = true;
-            }
-        }
-
-        if (!has_yaw || !has_pitch) {
-            current_joint_msg_.reset();
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 1000,
-                "JointState missing yaw_joint or pitch_joint.");
-            return;
-        }
-
-        current_joint_msg_ = msg;
-        current_yaw = yaw;
-        current_pitch = pitch;
-    }
-
     // ---------- 主回调 ----------
     void aimingCallback(const buff_interfaces::msg::BuffAimingData::SharedPtr msg) {
         if (!msg->is_tracking) {
-            resetCommandLimiter();
             return;
-        }
-        if (!current_joint_msg_) {
-            if (require_joint_states_) {
-                resetCommandLimiter();
-                RCLCPP_WARN_THROTTLE(
-                    this->get_logger(), *this->get_clock(), 1000,
-                    "No JointState received, skip autoaim command.");
-                return;
-            }
-            current_yaw = 0.0;
-            current_pitch = 0.0;
         }
         // 计算消息延迟
         rclcpp::Time msg_stamp = msg->header.stamp;
@@ -158,7 +88,6 @@ private:
         double t_fly = std::max(std::hypot( msg->target_x_3d, msg->target_y_3d ) / bullet_speed_, 0.05);
 
         // ---------- 弹道迭代 ----------
-        BallisticResult final_result{0.0, t_fly};
         double final_yaw = 0.0;
         double final_pitch = 0.0;
         double distance_3d = 0.0;
@@ -176,7 +105,6 @@ private:
         BallisticResult res = solveBallistic(distance_xy, pred_odom.z);
 
         // 4. 更新最终结果
-        final_result = res;
         final_pitch = -res.pitch;
         final_yaw = std::atan2(pred_odom.y, pred_odom.x);
         distance_3d = std::hypot(distance_xy, pred_odom.z);
@@ -195,40 +123,23 @@ private:
                 "Ballistic iteration did not converge, using last result.");
         }
 
-        // 计算相对角度差
-        double pitch_diff = -(final_pitch - current_pitch);
-        double yaw_diff   = final_yaw - current_yaw;
+        // 与 buff2 保持一致：直接发布 target_frame 下的绝对瞄准角，不再转换为云台相对控制量。
         const rclcpp::Time publish_time = this->now();
-        double yaw_cmd = std::clamp(yaw_diff, -command_limit_, command_limit_);
-        double pitch_cmd = std::clamp(pitch_diff, -command_limit_, command_limit_);
-
-        if (has_last_command_) {
-            double dt = (publish_time - last_command_time_).seconds();
-            if (!std::isfinite(dt) || dt < 0.0) {
-                dt = 0.0;
-            }
-            if (max_command_dt_ > 0.0) {
-                dt = std::min(dt, max_command_dt_);
-            }
-
-            yaw_cmd = limitCommandRate(yaw_cmd, last_yaw_cmd_, yaw_command_rate_limit_, dt);
-            pitch_cmd = limitCommandRate(pitch_cmd, last_pitch_cmd_, pitch_command_rate_limit_, dt);
-        }
 
         // 发布自瞄指令
         auto autoaim_msg = std::make_unique<gary_msgs::msg::AutoAIM>();
-        autoaim_msg->yaw   = yaw_cmd;
-        autoaim_msg->pitch = pitch_cmd;
-        autoaim_msg->target_distance = distance_3d;
+        autoaim_msg->yaw   = static_cast<float>(final_yaw);
+        autoaim_msg->pitch = static_cast<float>(final_pitch);
+        autoaim_msg->target_distance = static_cast<float>(distance_3d);
         autoaim_msg->header.stamp = publish_time;
         autoaim_msg->header.frame_id = target_frame_;
-        autoaim_msg->shoot_command = 1;
+        autoaim_msg->target_id = gary_msgs::msg::AutoAIM::TARGET_ID6_OUTPOST;
+        autoaim_msg->vision_mode = msg->is_bigbuff == 1
+            ? gary_msgs::msg::AutoAIM::VISION_MODE_BIG
+            : gary_msgs::msg::AutoAIM::VISION_MODE_SMALL;
+        autoaim_msg->shoot_command = gary_msgs::msg::AutoAIM::ALLOW_SHOOT;
+        autoaim_msg->shoot_mode = gary_msgs::msg::AutoAIM::SHOOT_MODE_AUTO;
         autoaim_pub_->publish(std::move(autoaim_msg));
-
-        last_yaw_cmd_ = yaw_cmd;
-        last_pitch_cmd_ = pitch_cmd;
-        last_command_time_ = publish_time;
-        has_last_command_ = true;
 
         // 调试信息
         if (debug_) {
@@ -237,18 +148,6 @@ private:
             debug_msg.plan_pitch = final_pitch;
             debug_pub_->publish(debug_msg);
         }
-    }
-
-
-    double limitCommandRate(double target, double last, double rate_limit, double dt) const {
-        const double max_step = rate_limit * dt;
-        return std::clamp(target, last - max_step, last + max_step);
-    }
-
-    void resetCommandLimiter() {
-        has_last_command_ = false;
-        last_yaw_cmd_ = 0.0;
-        last_pitch_cmd_ = 0.0;
     }
 
 
@@ -373,28 +272,14 @@ private:
 
 
     rclcpp::Subscription<buff_interfaces::msg::BuffAimingData>::SharedPtr aiming_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
     rclcpp::Publisher<gary_msgs::msg::AutoAIM>::SharedPtr autoaim_pub_;
     rclcpp::Publisher<gary_msgs::msg::AutoAimDebug>::SharedPtr debug_pub_;
 
-    sensor_msgs::msg::JointState::SharedPtr current_joint_msg_;
-
     std::string target_frame_;
-    double current_yaw = 0.0;
-    double current_pitch = 0.0;
     double bullet_speed_, shoot_delay_, physical_radius_;
     double gravity_, air_k_, converge_thresh_, sim_dt_, stop_error_;
-    double command_limit_ = 0.1;
-    double yaw_command_rate_limit_ = 0.8;
-    double pitch_command_rate_limit_ = 0.8;
-    double max_command_dt_ = 0.05;
-    double last_yaw_cmd_ = 0.0;
-    double last_pitch_cmd_ = 0.0;
-    rclcpp::Time last_command_time_{0, 0, RCL_ROS_TIME};
     int max_iteration_;
     bool debug_;
-    bool require_joint_states_ = false;
-    bool has_last_command_ = false;
 };
 
 

@@ -57,13 +57,6 @@ buff_aimer_node:
       sim_dt: 0.005
     aiming:
       debug: true
-    gimbal:
-      command_limit: 0.1
-      yaw_command_rate_limit: 0.8
-      pitch_command_rate_limit: 0.8
-      require_joint_states: false
-      # 限制参与导数计算的最大 dt，避免长时间断流后第一帧跳太大（秒）
-      max_command_dt: 0.001
     frames:
       target: "odom"
     physical_radius: 0.75

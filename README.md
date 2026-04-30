@@ -53,18 +53,15 @@
 `buff_aimer_node` 订阅：
 
 1. `/buff/aiming_data`
-2. `/joint_states`，可选
 
-发布 `/autoaim/target`，内容包括 yaw/pitch 相对控制量、目标距离和发射命令。
+发布 `/autoaim/target`，内容包括 yaw/pitch 绝对瞄准角、目标距离和发射命令。
 
 工作流程：
 
 1. 读取当前目标 3D 状态和大符速度拟合参数。
 2. 根据消息延迟、子弹飞行时间和射击延迟预测命中时刻的目标位置。
 3. 迭代求解弹道飞行时间。
-4. 结合当前云台角度输出相对 yaw/pitch。
-
-仿真没有 `/joint_states` 时，默认按当前 yaw/pitch 为 0 继续发布；真车需要强制依赖关节角时，把 `gimbal.require_joint_states` 设为 `true`。
+4. 与 buff2 一样，直接输出 `frames.target` 坐标系下的绝对 yaw/pitch，不再做云台相对角、限幅或限速处理。
 
 ## Debug
 

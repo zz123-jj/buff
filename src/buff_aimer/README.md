@@ -1,15 +1,14 @@
 # buff_aimer
 
-`buff_aimer` 接收 `/buff/aiming_data`，预测命中时刻目标位置，解弹道，并发布最终云台控制量。
+`buff_aimer` 接收 `/buff/aiming_data`，预测命中时刻目标位置，解弹道，并发布最终绝对瞄准角。
 
 输入：
 
 - `/buff/aiming_data`
-- `/joint_states`，可选
 
 输出：
 
 - `/autoaim/target`
 - `/autoaim/debug`
 
-仿真没有 `/joint_states` 时默认使用 yaw/pitch 为 0 继续发布；真车需要强制等待关节角时，将 `gimbal.require_joint_states` 设为 `true`。
+`/autoaim/target` 中的 yaw/pitch 与 buff2 保持一致，直接使用 `frames.target` 坐标系下的绝对角；节点不再订阅 `/joint_states`，也不再做云台相对角、限幅或限速处理。
