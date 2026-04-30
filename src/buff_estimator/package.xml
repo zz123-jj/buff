@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>buff_predictor</name>
+  <name>buff_estimator</name>
   <version>1.0.0</version>
-  <description>RoboMaster buff angle predictor using FFT and curve fitting</description>
+  <description>Buff target state estimator: 2D target measurements to 3D aiming data and rune speed fit.</description>
   <maintainer email="your_email@example.com">Your Name</maintainer>
   <license>MIT</license>
 

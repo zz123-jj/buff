@@ -35,12 +35,12 @@ def generate_launch_description():
         package='rclcpp_components',
         executable='component_container',
         composable_node_descriptions=[
-            ComposableNode(
-                package='camera',
-                plugin='CameraPublisher',
-                name='camera_publisher',
-                parameters=[camera_param]
-            ),
+            # ComposableNode(
+            #     package='camera',
+            #     plugin='CameraPublisher',
+            #     name='camera_publisher',
+            #     parameters=[camera_param]
+            # ),
             # ComposableNode(
             #     package='armor_detector',
             #     plugin='rm_auto_aim::ArmorDetectorNode',
@@ -71,16 +71,16 @@ def generate_launch_description():
                 extra_arguments=[{'use_intra_process_comms': True}]
             ),
             ComposableNode(
-                package='buff_predictor',
-                plugin='BuffPredictorNode',
-                name='buff_predictor_node',
+                package='buff_estimator',
+                plugin='BuffEstimatorNode',
+                name='buff_estimator_node',
                 parameters=[buff_param],
                 extra_arguments=[{'use_intra_process_comms': True}]
 ),
             ComposableNode(
-                package='buff_solver',
-                plugin='BuffSolver',
-                name='buff_solver_node',
+                package='buff_aimer',
+                plugin='BuffAimer',
+                name='buff_aimer_node',
                 parameters=[buff_param],
                 extra_arguments=[{'use_intra_process_comms': True}]
             ),
@@ -95,9 +95,15 @@ def generate_launch_description():
     
     robot_description = Command(['xacro ', os.path.join(
         get_package_share_directory('rm_gimbal_description'), 'urdf', 'rm_gimbal.urdf.xacro'),
-        ' xyz:=', launch_params['odom2camera']['xyz'], ' rpy:=', launch_params['odom2camera']['rpy']])
+        ' camera_xyz:="', launch_params['odom2camera']['xyz'], '"',
+        ' camera_rpy:="', launch_params['odom2camera']['rpy'], '"'])
 
-    joint_tf_publisher = Node( package='joint_tf_publisher', executable='joint_tf_publisher')
+    joint_tf_publisher = Node(
+        package='gimbal_tf_publisher',
+        executable='joint_tf_publisher',
+        name='joint_tf_publisher',
+        output='screen',
+    )
 
     robot_state_publisher = Node(
         package='robot_state_publisher',

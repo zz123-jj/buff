@@ -19,32 +19,25 @@ find_package(image_transport REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
-
-# ------------------------------------------------------------
-# 强制使用环境变量 ONNXRUNTIME_DIR
-# ------------------------------------------------------------
-set(ONNXRUNTIME_DIR "$ENV{ONNXRUNTIME_DIR}" CACHE PATH "ONNX Runtime root directory")
-if(NOT ONNXRUNTIME_DIR)
-  message(FATAL_ERROR "ONNXRUNTIME_DIR environment variable not set. Please set it to the ONNX Runtime install path.")
+if(NOT OpenVINO_DIR AND EXISTS "/opt/intel/openvino_2024.6.0/runtime/cmake/OpenVINOConfig.cmake")
+  set(OpenVINO_DIR "/opt/intel/openvino_2024.6.0/runtime/cmake/" CACHE PATH "OpenVINO CMake directory")
 endif()
-
-find_path(ONNX_INCLUDE_DIR
-  NAMES onnxruntime_cxx_api.h
-  PATHS ${ONNXRUNTIME_DIR}/include
-  NO_DEFAULT_PATH
-)
-
-find_library(ONNX_LIB
-  NAMES onnxruntime libonnxruntime
-  PATHS ${ONNXRUNTIME_DIR}/lib
-  NO_DEFAULT_PATH
-)
-
-if(NOT ONNX_INCLUDE_DIR OR NOT ONNX_LIB)
-  message(FATAL_ERROR "ONNX Runtime not found at ${ONNXRUNTIME_DIR}")
+if(NOT OpenVINO_DIR)
+  execute_process(
+    COMMAND python3 -c "import pathlib, openvino; print(pathlib.Path(openvino.__file__).resolve().parent / 'cmake')"
+    OUTPUT_VARIABLE PYTHON_OPENVINO_CMAKE
+    RESULT_VARIABLE PYTHON_OPENVINO_RESULT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(PYTHON_OPENVINO_RESULT EQUAL 0 AND EXISTS "${PYTHON_OPENVINO_CMAKE}/OpenVINOConfig.cmake")
+    set(OpenVINO_DIR "${PYTHON_OPENVINO_CMAKE}" CACHE PATH "OpenVINO CMake directory")
+  endif()
 endif()
-
-message(STATUS "Found ONNX Runtime: include=${ONNX_INCLUDE_DIR}, lib=${ONNX_LIB}")
+if(NOT OpenVINO_DIR AND EXISTS "$ENV{HOME}/.local/lib/python3.10/site-packages/openvino/cmake/OpenVINOConfig.cmake")
+  set(OpenVINO_DIR "$ENV{HOME}/.local/lib/python3.10/site-packages/openvino/cmake" CACHE PATH "OpenVINO CMake directory")
+endif()
+find_package(OpenVINO REQUIRED)
 
 # 创建共享库
 add_library(${PROJECT_NAME}_component SHARED
@@ -55,7 +48,6 @@ add_library(${PROJECT_NAME}_component SHARED
 
 target_include_directories(${PROJECT_NAME}_component PRIVATE
   include
-  ${ONNX_INCLUDE_DIR}
 )
 
 ament_target_dependencies(${PROJECT_NAME}_component
@@ -71,8 +63,16 @@ ament_target_dependencies(${PROJECT_NAME}_component
 )
 
 target_link_libraries(${PROJECT_NAME}_component
-  ${ONNX_LIB}
+  openvino::runtime
 )
+
+if(OpenVINO_DIR MATCHES "site-packages/openvino/cmake$")
+  get_filename_component(PYTHON_OPENVINO_ROOT "${OpenVINO_DIR}" DIRECTORY)
+  set_target_properties(${PROJECT_NAME}_component PROPERTIES
+    BUILD_RPATH "${PYTHON_OPENVINO_ROOT}/libs"
+    INSTALL_RPATH "${PYTHON_OPENVINO_ROOT}/libs"
+  )
+endif()
 
 # 组件注册
 rclcpp_components_register_node(

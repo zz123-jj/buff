@@ -1,34 +1,36 @@
 # ======================================================================
 # 能量机关自瞄系统参数配置文件
-# 用于 buff_detector、buff_predictor、buff_solver 三个节点
+# 用于 buff_detector、buff_estimator、buff_aimer 三个节点
 # ======================================================================
 
 # -------------------- 检测节点 (buff_detector) --------------------
 buff_detector_node:
   ros__parameters:
-      model_path: model/Fan.onnx
+      model_path: model/yolo11_buff_int8.xml
+      openvino_device: GPU
       use_cuda: false
-      confidence_threshold: 0.20
+      confidence_threshold: 0.70
       iou_threshold: 0.5
       debug_mode: true
+      image_reliable: true
       inside_shade_rate: 0.7
       outside_shade_rate: 1.39
       hsv_limits:
         lower: [0, 40, 220]
         upper: [70, 255, 255]
       dilate_kernel_size: 7
-      max_lost_frame: 130
+      max_lost_frame: 10
 
 
 
 
-# -------------------- 预测节点 (buff_predictor) --------------------
-buff_predictor_node:
+# -------------------- 状态估计节点 (buff_estimator) --------------------
+buff_estimator_node:
   ros__parameters:
     target_frame: odom
     camera_frame: camera_optical_frame
     debug_mode: true
-    debug_csv_path: buff_predictor_debug.csv
+    debug_csv_path: buff_estimator_debug.csv
     physical_arm_length: 0.75
     velocity_median_window: 3
     radius_mean_window: 15
@@ -43,49 +45,25 @@ buff_predictor_node:
 
 
 
-# -------------------- 自瞄求解节点 (buff_solver) --------------------
-buff_solver_node:
+# -------------------- 自瞄输出节点 (buff_aimer) --------------------
+buff_aimer_node:
   ros__parameters:
-    # 弹道模型参数
     ballistic:
-      # 子弹初速（m/s）
       bullet_speed: 23.8
-
-      # 发射机构机械/电路延迟（秒）
       shoot_delay: 0.05
-
-      # 重力加速度（m/s²）
       gravity: 9.81
-
-      # 空气阻力系数 k，公式：F_air = -k * v
       air_k: 0.019
-
-      # 弹道迭代收敛阈值：飞行时间变化小于此值时停止迭代（秒）
       converge_thresh: 0.002
-
-      # 弹道仿真步长（秒）
       sim_dt: 0.005
-
-    # 自瞄控制参数
     aiming:
-      # 是否发布调试话题（/autoaim/debug）
       debug: true
-
-    # 云台输出限幅参数
     gimbal:
-      # 单帧 yaw/pitch 相对角度命令最大值（rad）
       command_limit: 0.1
-
-      # yaw/pitch 命令变化率限制（rad/s），值越小越平滑
       yaw_command_rate_limit: 0.8
       pitch_command_rate_limit: 0.8
-
+      require_joint_states: false
       # 限制参与导数计算的最大 dt，避免长时间断流后第一帧跳太大（秒）
       max_command_dt: 0.001
-
-    # 坐标系名称
     frames:
       target: "odom"
-
-    # 能量机关物理旋转半径（米），与 predictor 中的 arm_length 保持一致
     physical_radius: 0.75

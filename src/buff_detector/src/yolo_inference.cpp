@@ -1,398 +1,368 @@
-// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
-
 #include "buff_detector/yolo_inference.hpp"
-#include <regex>
 
-#define benchmark
-#define min(a,b)            (((a) < (b)) ? (a) : (b))
-YOLO_V8::YOLO_V8() {
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <sstream>
+#include <utility>
 
-}
-
-YOLO_V8::YOLO_V8(DL_INIT_PARAM& iParams){
-    YOLO_V8();
-    CreateSession(iParams);
-}
-
-
-YOLO_V8::~YOLO_V8() {
-    delete session;
-}
-
-#ifdef USE_CUDA
-namespace Ort
+namespace
 {
-    template<>
-    struct TypeToTensorType<half> { static constexpr ONNXTensorElementDataType type = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16; };
-}
-#endif
-
+constexpr float kMinRBoxSize = 8.0f;
+constexpr int kRThreshold = 100;
 
 template<typename T>
-char* BlobFromImage(cv::Mat& iImg, T& iBlob) {
-    int channels = iImg.channels();
-    int imgHeight = iImg.rows;
-    int imgWidth = iImg.cols;
-
-    for (int c = 0; c < channels; c++)
-    {
-        for (int h = 0; h < imgHeight; h++)
-        {
-            for (int w = 0; w < imgWidth; w++)
-            {
-                iBlob[c * imgWidth * imgHeight + h * imgWidth + w] = typename std::remove_pointer<T>::type(
-                    (iImg.at<cv::Vec3b>(h, w)[c]) / 255.0f);
-            }
-        }
-    }
-    return RET_OK;
-}
-
-
-char* YOLO_V8::PreProcess(cv::Mat& iImg, std::vector<int> iImgSize, cv::Mat& oImg)
+std::vector<float> tensor_to_float_vector(const ov::Tensor& tensor)
 {
-    if (iImg.empty() || iImgSize.size() < 2 || iImgSize.at(0) <= 0 || iImgSize.at(1) <= 0)
-    {
-        return "[YOLO_V8]:Invalid input image or model input size.";
-    }
-
-    const int target_h = iImgSize.at(0);
-    const int target_w = iImgSize.at(1);
-
-    if (iImg.channels() == 3)
-    {
-        oImg = iImg.clone();
-        cv::cvtColor(oImg, oImg, cv::COLOR_BGR2RGB);
-    }
-    else
-    {
-        cv::cvtColor(iImg, oImg, cv::COLOR_GRAY2RGB);
-    }
-
-    switch (modelType)
-    {
-    case YOLO_DETECT_V8:
-    case YOLO_POSE:
-    case YOLO_DETECT_V8_HALF:
-    case YOLO_POSE_V8_HALF://LetterBox
-    {
-        const float scale_x = static_cast<float>(target_w) / static_cast<float>(iImg.cols);
-        const float scale_y = static_cast<float>(target_h) / static_cast<float>(iImg.rows);
-        const float scale = (scale_x < scale_y) ? scale_x : scale_y;
-
-        const int resized_w = std::max(1, static_cast<int>(iImg.cols * scale));
-        const int resized_h = std::max(1, static_cast<int>(iImg.rows * scale));
-
-        resizeScales = 1.0f / scale;
-        cv::resize(oImg, oImg, cv::Size(resized_w, resized_h));
-
-        cv::Mat tempImg = cv::Mat::zeros(target_h, target_w, CV_8UC3);
-        oImg.copyTo(tempImg(cv::Rect(0, 0, resized_w, resized_h)));
-        oImg = tempImg;
-        break;
-    }
-    case YOLO_CLS://CenterCrop
-    {
-        int h = iImg.rows;
-        int w = iImg.cols;
-        int m = min(h, w);
-        int top = (h - m) / 2;
-        int left = (w - m) / 2;
-        cv::resize(oImg(cv::Rect(left, top, m, m)), oImg, cv::Size(iImgSize.at(0), iImgSize.at(1)));
-        break;
-    }
-    }
-    return RET_OK;
+    const auto* data = tensor.data<const T>();
+    std::vector<float> values(tensor.get_size());
+    std::transform(data, data + tensor.get_size(), values.begin(), [](T value) {
+        return static_cast<float>(value);
+    });
+    return values;
 }
+}  // namespace
 
-
-char* YOLO_V8::CreateSession(DL_INIT_PARAM& iParams) {
-    char* Ret = RET_OK;
-    std::regex pattern("[\u4e00-\u9fa5]");
-    bool result = std::regex_search(iParams.modelPath, pattern);
-    if (result)
-    {
-        Ret = "[YOLO_V8]:Your model path is error.Change your model path without chinese characters.";
-        std::cout << Ret << std::endl;
-        return Ret;
-    }
+bool BuffYoloPoseOpenVINO::create_session(
+    const std::string& model_path,
+    const std::string& device_name,
+    float confidence_threshold,
+    std::size_t keypoint_count,
+    int input_size
+)
+{
     try
     {
-        rectConfidenceThreshold = iParams.rectConfidenceThreshold;
-        iouThreshold = iParams.iouThreshold;
-        imgSize = iParams.imgSize;
-        modelType = iParams.modelType;
-        cudaEnable = iParams.cudaEnable;
-        env = Ort::Env(ORT_LOGGING_LEVEL_WARNING, "Yolo");
-        Ort::SessionOptions sessionOption;
-        if (iParams.cudaEnable)
-        {
-            OrtCUDAProviderOptions cudaOption;
-            cudaOption.device_id = 0;
-            sessionOption.AppendExecutionProvider_CUDA(cudaOption);
-        }
-        sessionOption.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        sessionOption.SetIntraOpNumThreads(iParams.intraOpNumThreads);
-        sessionOption.SetLogSeverityLevel(iParams.logSeverityLevel);
+        device_name_ = device_name;
+        confidence_threshold_ = confidence_threshold;
+        keypoint_count_ = keypoint_count;
+        input_size_ = input_size;
 
-#ifdef _WIN32
-        int ModelPathSize = MultiByteToWideChar(CP_UTF8, 0, iParams.modelPath.c_str(), static_cast<int>(iParams.modelPath.length()), nullptr, 0);
-        wchar_t* wide_cstr = new wchar_t[ModelPathSize + 1];
-        MultiByteToWideChar(CP_UTF8, 0, iParams.modelPath.c_str(), static_cast<int>(iParams.modelPath.length()), wide_cstr, ModelPathSize);
-        wide_cstr[ModelPathSize] = L'\0';
-        const wchar_t* modelPath = wide_cstr;
-#else
-        const char* modelPath = iParams.modelPath.c_str();
-#endif // _WIN32
-
-        session = new Ort::Session(env, modelPath, sessionOption);
-        Ort::AllocatorWithDefaultOptions allocator;
-        size_t inputNodesNum = session->GetInputCount();
-        for (size_t i = 0; i < inputNodesNum; i++)
-        {
-            Ort::AllocatedStringPtr input_node_name = session->GetInputNameAllocated(i, allocator);
-            char* temp_buf = new char[50];
-            strcpy(temp_buf, input_node_name.get());
-            inputNodeNames.push_back(temp_buf);
-        }
-        size_t OutputNodesNum = session->GetOutputCount();
-        for (size_t i = 0; i < OutputNodesNum; i++)
-        {
-            Ort::AllocatedStringPtr output_node_name = session->GetOutputNameAllocated(i, allocator);
-            char* temp_buf = new char[10];
-            strcpy(temp_buf, output_node_name.get());
-            outputNodeNames.push_back(temp_buf);
-        }
-        options = Ort::RunOptions{ nullptr };
-        WarmUpSession();
-        return RET_OK;
+        model_ = core_.read_model(model_path);
+        compiled_model_ = core_.compile_model(model_, device_name_);
+        infer_request_ = compiled_model_.create_infer_request();
+        input_tensor_ = infer_request_.get_input_tensor();
+        input_tensor_.set_shape({1, 3, static_cast<std::size_t>(input_size_), static_cast<std::size_t>(input_size_)});
+        warm_up();
+        last_error_.clear();
+        return true;
     }
     catch (const std::exception& e)
     {
-        const char* str1 = "[YOLO_V8]:";
-        const char* str2 = e.what();
-        std::string result = std::string(str1) + std::string(str2);
-        char* merged = new char[result.length() + 1];
-        std::strcpy(merged, result.c_str());
-        std::cout << merged << std::endl;
-        delete[] merged;
-        return "[YOLO_V8]:Create session failed.";
+        last_error_ = e.what();
+        return false;
     }
-
 }
 
-
-char* YOLO_V8::RunSession(cv::Mat& iImg, std::vector<DL_RESULT>& oResult) {
-#ifdef benchmark
-    clock_t starttime_1 = clock();
-#endif // benchmark
-
-    char* Ret = RET_OK;
-    cv::Mat processedImg;
-    Ret = PreProcess(iImg, imgSize, processedImg);
-    if (Ret != RET_OK)
+bool BuffYoloPoseOpenVINO::run(const cv::Mat& bgr_image, BuffPoseResult& result)
+{
+    if (bgr_image.empty())
     {
-        return Ret;
-    }
-    if (modelType < 4)
-    {
-        float* blob = new float[processedImg.total() * 3];
-        BlobFromImage(processedImg, blob);
-        std::vector<int64_t> inputNodeDims = { 1, 3, imgSize.at(0), imgSize.at(1) };
-        TensorProcess(starttime_1, iImg, blob, inputNodeDims, oResult);
-    }
-    else
-    {
-#ifdef USE_CUDA
-        half* blob = new half[processedImg.total() * 3];
-        BlobFromImage(processedImg, blob);
-        std::vector<int64_t> inputNodeDims = { 1,3,imgSize.at(0),imgSize.at(1) };
-        TensorProcess(starttime_1, iImg, blob, inputNodeDims, oResult);
-#endif
+        last_error_ = "empty input image";
+        return false;
     }
 
-    return Ret;
+    try
+    {
+        const float scale_factor = fill_tensor(bgr_image);
+        infer_request_.infer();
+
+        BuffPoseResult parsed;
+        if (!parse_output(infer_request_.get_output_tensor(), scale_factor, parsed))
+        {
+            return false;
+        }
+
+        parsed.fan_box = keypoints_to_rect(parsed.keypoints, 0, 4, bgr_image.size());
+        parsed.r_box = detect_r_box(parsed.keypoints, bgr_image);
+        if (parsed.fan_box.area() <= 0 || parsed.r_box.area() <= 0)
+        {
+            last_error_ = "invalid fan or R box from pose keypoints";
+            return false;
+        }
+
+        result = std::move(parsed);
+        last_error_.clear();
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        last_error_ = e.what();
+        return false;
+    }
 }
 
+float BuffYoloPoseOpenVINO::fill_tensor(const cv::Mat& bgr_image)
+{
+    const float scale = std::min(
+        input_size_ / static_cast<float>(bgr_image.rows),
+        input_size_ / static_cast<float>(bgr_image.cols)
+    );
 
-template<typename N>
-char* YOLO_V8::TensorProcess(clock_t& starttime_1, cv::Mat& iImg, N& blob, std::vector<int64_t>& inputNodeDims,
-    std::vector<DL_RESULT>& oResult) {
-    Ort::Value inputTensor = Ort::Value::CreateTensor<typename std::remove_pointer<N>::type>(
-        Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU), blob, 3 * imgSize.at(0) * imgSize.at(1),
-        inputNodeDims.data(), inputNodeDims.size());
-#ifdef benchmark
-    clock_t starttime_2 = clock();
-#endif // benchmark
-    auto outputTensor = session->Run(options, inputNodeNames.data(), &inputTensor, 1, outputNodeNames.data(),
-        outputNodeNames.size());
-#ifdef benchmark
-    clock_t starttime_3 = clock();
-#endif // benchmark
+    cv::Mat blob_image;
+    const cv::Matx23f matrix{scale, 0.0f, 0.0f, 0.0f, scale, 0.0f};
+    cv::warpAffine(bgr_image, blob_image, matrix, cv::Size(input_size_, input_size_));
+    blob_image.convertTo(blob_image, CV_32F, 1.0 / 255.0);
+    cv::cvtColor(blob_image, blob_image, cv::COLOR_BGR2RGB);
 
-    Ort::TypeInfo typeInfo = outputTensor.front().GetTypeInfo();
-    auto tensor_info = typeInfo.GetTensorTypeAndShapeInfo();
-    std::vector<int64_t> outputNodeDims = tensor_info.GetShape();
-    auto output = outputTensor.front().GetTensorMutableData<typename std::remove_pointer<N>::type>();
-    delete[] blob;
-    switch (modelType)
+    auto* data = input_tensor_.data<float>();
+    for (int c = 0; c < 3; ++c)
     {
-    case YOLO_DETECT_V8:
-    case YOLO_DETECT_V8_HALF:
-    {
-        int signalResultNum = outputNodeDims[1];//84
-        int strideNum = outputNodeDims[2];//8400
-        std::vector<int> class_ids;
-        std::vector<float> confidences;
-        std::vector<cv::Rect> boxes;
-        cv::Mat rawData;
-        if (modelType == YOLO_DETECT_V8)
+        for (int h = 0; h < input_size_; ++h)
         {
-            // FP32
-            rawData = cv::Mat(signalResultNum, strideNum, CV_32F, output);
-        }
-        else
-        {
-            // FP16
-            rawData = cv::Mat(signalResultNum, strideNum, CV_16F, output);
-            rawData.convertTo(rawData, CV_32F);
-        }
-        // Note:
-        // ultralytics add transpose operator to the output of yolov8 model.which make yolov8/v5/v7 has same shape
-        // https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt
-        rawData = rawData.t();
-
-        float* data = (float*)rawData.data;
-
-        for (int i = 0; i < strideNum; ++i)
-        {
-            float* classesScores = data + 4;
-            cv::Mat scores(1, this->classes.size(), CV_32FC1, classesScores);
-            cv::Point class_id;
-            double maxClassScore;
-            cv::minMaxLoc(scores, 0, &maxClassScore, 0, &class_id);
-            if (maxClassScore > rectConfidenceThreshold)
+            for (int w = 0; w < input_size_; ++w)
             {
-                confidences.push_back(maxClassScore);
-                class_ids.push_back(class_id.x);
-                float x = data[0];
-                float y = data[1];
-                float w = data[2];
-                float h = data[3];
-
-                int left = int((x - 0.5 * w) * resizeScales);
-                int top = int((y - 0.5 * h) * resizeScales);
-
-                int width = int(w * resizeScales);
-                int height = int(h * resizeScales);
-
-                boxes.push_back(cv::Rect(left, top, width, height));
+                data[c * input_size_ * input_size_ + h * input_size_ + w] =
+                    blob_image.at<cv::Vec3f>(h, w)[c];
             }
-            data += signalResultNum;
         }
-        std::vector<int> nmsResult;
-        cv::dnn::NMSBoxes(boxes, confidences, rectConfidenceThreshold, iouThreshold, nmsResult);
-        for (int i = 0; i < nmsResult.size(); ++i)
-        {
-            int idx = nmsResult[i];
-            DL_RESULT result;
-            result.classId = class_ids[idx];
-            result.confidence = confidences[idx];
-            result.box = boxes[idx];
-            oResult.push_back(result);
-        }
-
-#ifdef benchmark
-        clock_t starttime_4 = clock();
-        double pre_process_time = (double)(starttime_2 - starttime_1) / CLOCKS_PER_SEC * 1000;
-        double process_time = (double)(starttime_3 - starttime_2) / CLOCKS_PER_SEC * 1000;
-        double post_process_time = (double)(starttime_4 - starttime_3) / CLOCKS_PER_SEC * 1000;
-        if (cudaEnable)
-        {
-            std::cout << "[YOLO_V8(CUDA)]: " << pre_process_time << "ms pre-process, " << process_time << "ms inference, " << post_process_time << "ms post-process." << std::endl;
-        }
-        else
-        {
-            std::cout << "[YOLO_V8(CPU)]: " << pre_process_time << "ms pre-process, " << process_time << "ms inference, " << post_process_time << "ms post-process." << std::endl;
-        }
-#endif // benchmark
-
-        break;
     }
-    case YOLO_CLS:
-    case YOLO_CLS_HALF:
-    {
-        cv::Mat rawData;
-        if (modelType == YOLO_CLS) {
-            // FP32
-            rawData = cv::Mat(1, this->classes.size(), CV_32F, output);
-        } else {
-            // FP16
-            rawData = cv::Mat(1, this->classes.size(), CV_16F, output);
-            rawData.convertTo(rawData, CV_32F);
-        }
-        float *data = (float *) rawData.data;
 
-        DL_RESULT result;
-        for (int i = 0; i < this->classes.size(); i++)
-        {
-            result.classId = i;
-            result.confidence = data[i];
-            oResult.push_back(result);
-        }
-        break;
-    }
-    default:
-        std::cout << "[YOLO_V8]: " << "Not support model type." << std::endl;
-    }
-    return RET_OK;
-
+    return 1.0f / scale;
 }
 
-
-char* YOLO_V8::WarmUpSession() {
-    clock_t starttime_1 = clock();
-    cv::Mat iImg = cv::Mat(cv::Size(imgSize.at(1), imgSize.at(0)), CV_8UC3);
-    cv::Mat processedImg;
-    char* Ret = PreProcess(iImg, imgSize, processedImg);
-    if (Ret != RET_OK)
+bool BuffYoloPoseOpenVINO::parse_output(
+    const ov::Tensor& output_tensor,
+    float scale_factor,
+    BuffPoseResult& result
+)
+{
+    const auto element_type = output_tensor.get_element_type();
+    std::vector<float> values;
+    if (element_type == ov::element::f32)
     {
-        return Ret;
+        values = tensor_to_float_vector<float>(output_tensor);
     }
-    if (modelType < 4)
+    else if (element_type == ov::element::f16)
     {
-        float* blob = new float[processedImg.total() * 3];
-        BlobFromImage(processedImg, blob);
-        std::vector<int64_t> YOLO_input_node_dims = { 1, 3, imgSize.at(0), imgSize.at(1) };
-        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-            Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU), blob, 3 * imgSize.at(0) * imgSize.at(1),
-            YOLO_input_node_dims.data(), YOLO_input_node_dims.size());
-        auto output_tensors = session->Run(options, inputNodeNames.data(), &input_tensor, 1, outputNodeNames.data(),
-            outputNodeNames.size());
-        delete[] blob;
-        clock_t starttime_4 = clock();
-        double post_process_time = (double)(starttime_4 - starttime_1) / CLOCKS_PER_SEC * 1000;
-        if (cudaEnable)
-        {
-            std::cout << "[YOLO_V8(CUDA)]: " << "Cuda warm-up cost " << post_process_time << " ms. " << std::endl;
-        }
+        values = tensor_to_float_vector<ov::float16>(output_tensor);
     }
     else
     {
-#ifdef USE_CUDA
-        half* blob = new half[iImg.total() * 3];
-        BlobFromImage(processedImg, blob);
-        std::vector<int64_t> YOLO_input_node_dims = { 1,3,imgSize.at(0),imgSize.at(1) };
-        Ort::Value input_tensor = Ort::Value::CreateTensor<half>(Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU), blob, 3 * imgSize.at(0) * imgSize.at(1), YOLO_input_node_dims.data(), YOLO_input_node_dims.size());
-        auto output_tensors = session->Run(options, inputNodeNames.data(), &input_tensor, 1, outputNodeNames.data(), outputNodeNames.size());
-        delete[] blob;
-        clock_t starttime_4 = clock();
-        double post_process_time = (double)(starttime_4 - starttime_1) / CLOCKS_PER_SEC * 1000;
-        if (cudaEnable)
-        {
-            std::cout << "[YOLO_V8(CUDA)]: " << "Cuda warm-up cost " << post_process_time << " ms. " << std::endl;
-        }
-#endif
+        std::ostringstream oss;
+        oss << "unsupported output tensor type: " << element_type;
+        last_error_ = oss.str();
+        return false;
     }
-    return RET_OK;
+
+    const auto shape = output_tensor.get_shape();
+    const std::size_t min_feature_count = 5 + keypoint_count_ * 2;
+    std::size_t feature_count = 0;
+    std::size_t candidate_count = 0;
+    bool feature_major = true;
+
+    if (shape.size() == 3)
+    {
+        const std::size_t dim1 = shape[1];
+        const std::size_t dim2 = shape[2];
+        feature_major = dim1 <= dim2;
+        feature_count = feature_major ? dim1 : dim2;
+        candidate_count = feature_major ? dim2 : dim1;
+    }
+    else if (shape.size() == 2)
+    {
+        const std::size_t dim0 = shape[0];
+        const std::size_t dim1 = shape[1];
+        feature_major = dim0 <= dim1;
+        feature_count = feature_major ? dim0 : dim1;
+        candidate_count = feature_major ? dim1 : dim0;
+    }
+    else
+    {
+        last_error_ = "unsupported output tensor rank";
+        return false;
+    }
+
+    if (feature_count < min_feature_count || candidate_count == 0)
+    {
+        std::ostringstream oss;
+        oss << "unexpected output shape, features=" << feature_count
+            << " candidates=" << candidate_count;
+        last_error_ = oss.str();
+        return false;
+    }
+
+    auto at = [&](std::size_t feature, std::size_t candidate) -> float {
+        if (shape.size() == 3)
+        {
+            if (feature_major)
+            {
+                return values[feature * candidate_count + candidate];
+            }
+            return values[candidate * feature_count + feature];
+        }
+
+        if (feature_major)
+        {
+            return values[feature * candidate_count + candidate];
+        }
+        return values[candidate * feature_count + feature];
+    };
+
+    float best_confidence = -std::numeric_limits<float>::infinity();
+    std::size_t best_candidate = 0;
+    for (std::size_t candidate = 0; candidate < candidate_count; ++candidate)
+    {
+        const float confidence = at(4, candidate);
+        if (confidence > best_confidence)
+        {
+            best_confidence = confidence;
+            best_candidate = candidate;
+        }
+    }
+
+    if (best_confidence < confidence_threshold_)
+    {
+        std::ostringstream oss;
+        oss << "best confidence " << best_confidence
+            << " below threshold " << confidence_threshold_;
+        last_error_ = oss.str();
+        return false;
+    }
+
+    result.confidence = best_confidence;
+    result.keypoints.clear();
+    result.keypoints.reserve(keypoint_count_);
+    for (std::size_t i = 0; i < keypoint_count_; ++i)
+    {
+        result.keypoints.emplace_back(
+            at(5 + i * 2, best_candidate) * scale_factor,
+            at(5 + i * 2 + 1, best_candidate) * scale_factor
+        );
+    }
+
+    return true;
+}
+
+cv::Rect BuffYoloPoseOpenVINO::keypoints_to_rect(
+    const std::vector<cv::Point2f>& keypoints,
+    std::size_t begin,
+    std::size_t count,
+    const cv::Size& image_size
+) const
+{
+    if (keypoints.size() < begin + count || count == 0)
+    {
+        return {};
+    }
+
+    float x_min = std::numeric_limits<float>::max();
+    float y_min = std::numeric_limits<float>::max();
+    float x_max = std::numeric_limits<float>::lowest();
+    float y_max = std::numeric_limits<float>::lowest();
+    for (std::size_t i = begin; i < begin + count; ++i)
+    {
+        x_min = std::min(x_min, keypoints[i].x);
+        y_min = std::min(y_min, keypoints[i].y);
+        x_max = std::max(x_max, keypoints[i].x);
+        y_max = std::max(y_max, keypoints[i].y);
+    }
+
+    return clamp_rect(cv::Rect2f(x_min, y_min, x_max - x_min, y_max - y_min), image_size);
+}
+
+cv::Rect BuffYoloPoseOpenVINO::detect_r_box(
+    const std::vector<cv::Point2f>& keypoints,
+    const cv::Mat& bgr_image
+) const
+{
+    if (keypoints.size() < 6)
+    {
+        return {};
+    }
+
+    const cv::Point2f rough_center = (keypoints[5] - keypoints[4]) * 1.4f + keypoints[4];
+    const float radius = std::max(
+        static_cast<float>(cv::norm(keypoints[2] - keypoints[4]) * 0.8),
+        kMinRBoxSize
+    );
+
+    cv::Mat gray;
+    cv::cvtColor(bgr_image, gray, cv::COLOR_BGR2GRAY);
+    cv::Mat binary;
+    cv::threshold(gray, binary, kRThreshold, 255, cv::THRESH_BINARY);
+    const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+    cv::dilate(binary, binary, kernel);
+
+    cv::Mat mask = cv::Mat::zeros(binary.size(), CV_8U);
+    cv::circle(mask, rough_center, static_cast<int>(radius), cv::Scalar(255), -1);
+    cv::bitwise_and(binary, mask, binary);
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(binary, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+
+    cv::Rect best_rect;
+    double best_score = std::numeric_limits<double>::max();
+    for (const auto& contour : contours)
+    {
+        if (contour.size() < 5)
+        {
+            continue;
+        }
+
+        const cv::RotatedRect rotated_rect = cv::minAreaRect(contour);
+        const float width = std::max(rotated_rect.size.width, 1.0f);
+        const float height = std::max(rotated_rect.size.height, 1.0f);
+        const float ratio = std::max(width / height, height / width);
+        const double score =
+            ratio + cv::norm(rotated_rect.center - rough_center) / std::max(radius / 3.0f, 1.0f);
+
+        if (score < best_score)
+        {
+            best_score = score;
+            best_rect = cv::boundingRect(contour);
+        }
+    }
+
+    if (best_rect.area() > 0)
+    {
+        return clamp_rect(best_rect, bgr_image.size());
+    }
+
+    const float fallback_size = std::max(
+        static_cast<float>(cv::norm(keypoints[5] - keypoints[4]) * 0.7),
+        kMinRBoxSize
+    );
+    return clamp_rect(
+        cv::Rect2f(
+            rough_center.x - fallback_size * 0.5f,
+            rough_center.y - fallback_size * 0.5f,
+            fallback_size,
+            fallback_size
+        ),
+        bgr_image.size()
+    );
+}
+
+cv::Rect BuffYoloPoseOpenVINO::clamp_rect(const cv::Rect2f& rect, const cv::Size& image_size) const
+{
+    const float x_min = std::clamp(rect.x, 0.0f, static_cast<float>(std::max(image_size.width - 1, 0)));
+    const float y_min = std::clamp(rect.y, 0.0f, static_cast<float>(std::max(image_size.height - 1, 0)));
+    const float x_max = std::clamp(
+        rect.x + rect.width,
+        0.0f,
+        static_cast<float>(std::max(image_size.width, 0))
+    );
+    const float y_max = std::clamp(
+        rect.y + rect.height,
+        0.0f,
+        static_cast<float>(std::max(image_size.height, 0))
+    );
+
+    const int left = static_cast<int>(std::floor(x_min));
+    const int top = static_cast<int>(std::floor(y_min));
+    const int right = static_cast<int>(std::ceil(x_max));
+    const int bottom = static_cast<int>(std::ceil(y_max));
+    if (right <= left || bottom <= top)
+    {
+        return {};
+    }
+    return cv::Rect(left, top, right - left, bottom - top);
+}
+
+void BuffYoloPoseOpenVINO::warm_up()
+{
+    cv::Mat image(input_size_, input_size_, CV_8UC3, cv::Scalar(0, 0, 0));
+    fill_tensor(image);
+    infer_request_.infer();
 }

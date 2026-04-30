@@ -1,105 +1,84 @@
-# 能量机关识别模块
+# 能量机关自瞄模块
 
-## 1.目标：
+## 数据流
 
-接收每一帧后触发回调得到：
-    
-1. 相机拍摄此帧的时间戳
-2. 能量机关目前模式（大或小）
-3. 旋转方向（顺 逆）
-4. 目标扇页Box中心位置（像素坐标系）
-5. 中心RBox中心位置 （像素坐标系）
-6. 能量机关半径 （用于后续解算深度）
+```text
+/image_raw
+  -> buff_detector      识别目标扇叶/R 标，发布 2D 观测
+  -> buff_estimator     估计 3D 状态，拟合大符速度参数
+  -> buff_aimer         预测命中点，解弹道，发布云台控制量
+  -> /autoaim/target
+```
 
-触发‘正在跟随时’发送以上信息
+## buff_detector
 
-## 2.目前存在问题已解决：
+`buff_detector_node` 订阅 `/image_raw`，第一帧使用 OpenVINO YOLOPose 初始化目标扇叶和 R 标，后续用传统视觉跟踪。
 
-- [ ] 不确定获取的/image_raw的消息头是否是相机拍摄此帧的时间戳
-- [ ] 旋转方向 只测过人眼视角的逆时帧 
-- [ ] 大符模式有1-2个坐标同时出现 只传一个坐标不确定是否可行
-- [x] isTracking = false时 应重置其他消息为0避免错误使用
+发布 `/buff/target`，内容包括：
 
-## 3. 依赖
+1. 图像时间戳
+2. 是否正在跟踪
+3. 能量机关模式
+4. 旋转方向
+5. 目标扇叶中心像素坐标
+6. R 标中心像素坐标
+7. 像素半径
 
-onnxruntime下载完成之后配置环境变量cmake就能找到了
+模型默认路径为 `model/yolo11_buff_int8.xml`，默认 OpenVINO 设备为 `GPU`。
 
-``` nano ~/.bashrc```
+## buff_estimator
 
-```export ONNXRUNTIME_DIR ='.../onnxruntime/'```
+原 `buff_predictor` 已重命名为 `buff_estimator`，因为这个节点的主要职责不是直接输出云台预测量，而是把 detector 的 2D 观测估计成后续瞄准需要的 3D 状态。
 
-```export LD_LIBRARY_PATH=$ONNXRUNTIME_DIR/lib:$LD_LIBRARY_PATH```
+`buff_estimator_node` 订阅：
 
-# Predictor模块
+1. `/buff/target`
+2. `/camera_info`
+3. TF：`odom <- camera_optical_frame`
 
-## 1.目标：
+发布 `/buff/aiming_data`，内容包括：
 
-收到来自识别模块的消息后进行解算：
+1. R 标在相机系和 odom 系下的 3D 坐标
+2. 目标扇叶在 odom 系下的 3D 坐标
+3. 当前半径、角度、旋转方向
+4. 大符速度函数参数 `v(t)=A*sin(omega*t+phi)+b`
+5. 拟合窗口时间和样本数量
 
-1. 传递此帧拍摄时间戳
-2. 传递能量机关模式
-3. 传递旋转方向
-4. r标中心坐标（像素及 odom 系 3D）
-5. 小能量机关模式下只获取单个扇页odom系下的三维坐标
-6. 大能量机关模式下，解算角速度三角函数参数及拟合开始时间，并获取当前扇叶在 odom 系下的三维坐标（参数未就绪时置 0）
+小符模式下主要做坐标估计；大符模式下还会收集角速度样本并用 Ceres 拟合速度曲线。
 
-## 2.目前存在问题已解决：
+## buff_aimer
 
-- [x] is_tracking = false 时，重置所有消息为 0；is_bigbuff = true 但拟合未完成时，仅重置拟合参数相关字段为 0。
-- [ ] 修复了预测位置基准错误
-- [ ] 时间基准统一使用 fit_start_time_sec（速度函数的时间零点），避免了与消息时间戳混淆。
-- [ ] 优化初始飞行时间估算：改用 R 标中心距离，减少初值抖动，加速迭代收敛。
-- [ ] 拟合准确性有待进一步验证（当前使用 Ceres 带约束正弦拟合，稳定性较好, 所以能量机关什么时候可以做好给我测）。
-- [ ] odom 系坐标转换精度需结合 TF 树及相机标定进行实测评估。
-- [ ] 代码结构可进一步优化，但已具备完整功能，计划之后把这些全放到rm_auto_aim里。
+原 `buff_solver` 已重命名为 `buff_aimer`，因为这个节点最终负责把估计状态转换成自瞄控制输出。
 
+`buff_aimer_node` 订阅：
 
-## 3.回调链路：
+1. `/buff/aiming_data`
+2. `/joint_states`，可选
 
-接收到来自 detector 的消息后，按大小能量机关分为两路：
+发布 `/autoaim/target`，内容包括 yaw/pitch 相对控制量、目标距离和发射命令。
 
-小能量机关模式：仅负责坐标转换（像素 → 相机 → odom）。
+工作流程：
 
-大能量机关模式：
+1. 读取当前目标 3D 状态和大符速度拟合参数。
+2. 根据消息延迟、子弹飞行时间和射击延迟预测命中时刻的目标位置。
+3. 迭代求解弹道飞行时间。
+4. 结合当前云台角度输出相对 yaw/pitch。
 
-收集角速度数据点（绝对值 + 中值滤波）。
-在固定窗口长度（默认 1.5 秒）到达后，使用 Ceres Solver 进行一次正弦拟合。
-得到速度参数 v(t) = A·sin(ω·t + φ) + b 并记录拟合开始时间戳。
-将当前扇叶的 3D 坐标及拟合参数打包发送。
+仿真没有 `/joint_states` 时，默认按当前 yaw/pitch 为 0 继续发布；真车需要强制依赖关节角时，把 `gimbal.require_joint_states` 设为 `true`。
 
-# Solver模块
+## Debug
 
-1. 目标
-通过目标坐标解算弹道飞行时间，利用拟合参数预测未来目标位置，最终解算云台相对角度差（yaw / pitch）。
+查看主要输出：
 
-2. 已修复的关键问题
-时间基准修正：使用 fit_start_time_sec 作为速度函数的积分零点，保证角度增量计算正确。
+```bash
+ros2 topic hz /buff/target
+ros2 topic hz /buff/aiming_data
+ros2 topic hz /autoaim/target
+```
 
-初始飞行时间估算优化：改用稳定的 R 标中心距离估算 t_fly 初值，避免扇叶旋转引起的抖动。
+Foxglove：
 
-3. 工作流程
-接收 BuffAimingData 消息。
-若未跟踪或缺少关节状态，发布零指令。
-计算消息延迟 msg_latency。
-以 R 标中心距离估算初始子弹飞行时间 t_fly。
-迭代求解弹道：
-总延迟 = msg_latency + t_fly + shoot_delay。
-预测 total_delay 秒后的目标 3D 位置（基于拟合参数积分）。
-转换到枪口坐标系，解算所需飞行时间 res.t_fly。
-若 t_fly 变化小于阈值则收敛，否则更新并继续迭代。
-计算绝对目标角度（yaw / pitch），结合当前云台角度得到相对差。
-发布 AutoAIM 指令（包含 yaw_diff、pitch_diff、目标距离等）。
-
-# Debug
-
-采用foxgolve
-
-```sudo apt install ros-$ROS_DISTRO-foxglove-bridge```
-
-```ros2 launch foxglove_bridge foxglove_bridge_launch.xml```
-
-# Debug方案
-
-查看r标odom坐标系下坐标 随着云台晃动可以说明 tf的链路没有问题
-
-
+```bash
+sudo apt install ros-$ROS_DISTRO-foxglove-bridge
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml
+```

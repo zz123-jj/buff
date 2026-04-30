@@ -1,5 +1,5 @@
 // ============================================================
-// 文件名: buff_solver.cpp
+// 文件名: buff_aimer.cpp
 // 描述:   能量机关自瞄解算器（支持大小符，含弹道迭代）
 // ============================================================
 
@@ -23,10 +23,10 @@ struct BallisticResult {
     double t_fly;   // 子弹飞行时间 (s)
 };
 
-class BuffSolver : public rclcpp::Node {
+class BuffAimer : public rclcpp::Node {
 public:
-    explicit BuffSolver(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
-        : Node("buff_solver_node", options)
+    explicit BuffAimer(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
+        : Node("buff_aimer_node", options)
     {
         // ---------- 参数声明 ----------
         this->declare_parameter<std::string>("frames.target", "odom");
@@ -44,6 +44,7 @@ public:
         this->declare_parameter<double>("gimbal.yaw_command_rate_limit", 0.8);
         this->declare_parameter<double>("gimbal.pitch_command_rate_limit", 0.8);
         this->declare_parameter<double>("gimbal.max_command_dt", 0.05);
+        this->declare_parameter<bool>("gimbal.require_joint_states", false);
 
 // 读取参数也要对应加上前缀
         target_frame_    = this->get_parameter("frames.target").as_string();
@@ -63,9 +64,10 @@ public:
         pitch_command_rate_limit_ =
             std::max(0.0, this->get_parameter("gimbal.pitch_command_rate_limit").as_double());
         max_command_dt_ = std::max(0.0, this->get_parameter("gimbal.max_command_dt").as_double());
+        require_joint_states_ = this->get_parameter("gimbal.require_joint_states").as_bool();
 
         RCLCPP_INFO(this->get_logger(),
-            "BuffSolver started. bullet=%.2f m/s, radius=%.2f m", bullet_speed_, physical_radius_);
+            "BuffAimer started. bullet=%.2f m/s, radius=%.2f m", bullet_speed_, physical_radius_);
 
         // ---------- 订阅与发布 ----------
         aiming_sub_ = this->create_subscription<buff_interfaces::msg::BuffAimingData>(
@@ -132,10 +134,20 @@ private:
 
     // ---------- 主回调 ----------
     void aimingCallback(const buff_interfaces::msg::BuffAimingData::SharedPtr msg) {
-        // 若无关节状态数据或未追踪，不发布控制消息，并重置限幅状态。
-        if (!current_joint_msg_||!msg->is_tracking) {
+        if (!msg->is_tracking) {
             resetCommandLimiter();
             return;
+        }
+        if (!current_joint_msg_) {
+            if (require_joint_states_) {
+                resetCommandLimiter();
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 1000,
+                    "No JointState received, skip autoaim command.");
+                return;
+            }
+            current_yaw = 0.0;
+            current_pitch = 0.0;
         }
         // 计算消息延迟
         rclcpp::Time msg_stamp = msg->header.stamp;
@@ -381,10 +393,11 @@ private:
     rclcpp::Time last_command_time_{0, 0, RCL_ROS_TIME};
     int max_iteration_;
     bool debug_;
+    bool require_joint_states_ = false;
     bool has_last_command_ = false;
 };
 
 
 // 组件注册
 #include "rclcpp_components/register_node_macro.hpp"
-RCLCPP_COMPONENTS_REGISTER_NODE(BuffSolver)
+RCLCPP_COMPONENTS_REGISTER_NODE(BuffAimer)

@@ -20,24 +20,24 @@ def generate_launch_description():
         output='screen',
     )
 
-    buff_predictor = Node(
-        package='buff_predictor',
-        executable='buff_predictor_node',
-        name='buff_predictor_node',
+    buff_estimator = Node(
+        package='buff_estimator',
+        executable='buff_estimator_node',
+        name='buff_estimator_node',
         parameters=[buff_param],
         output='screen',
     )
 
-    buff_solver = Node(
-        package='buff_solver',
-        executable='buff_solver_node',
-        name='buff_solver_node',
+    buff_aimer = Node(
+        package='buff_aimer',
+        executable='buff_aimer_node',
+        name='buff_aimer_node',
         parameters=[buff_param],
         output='screen',
     )
 
     return LaunchDescription([
         buff_detector,
-        buff_predictor,
-        buff_solver,
+        buff_estimator,
+        buff_aimer,
     ])

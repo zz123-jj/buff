@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(buff_predictor)
+project(buff_estimator)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,7 +36,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 add_library(${PROJECT_NAME}_component SHARED
   src/predictor.cpp
   src/dataProcessor.cpp
-  src/predictor_node.cpp
+  src/estimator_node.cpp
 )
 
 target_include_directories(${PROJECT_NAME}_component PUBLIC
@@ -62,10 +62,10 @@ target_link_libraries(${PROJECT_NAME}_component
   Ceres::ceres
 )
 
-# 注册组件（自动生成可执行文件 buff_predictor_node）
+# 注册组件（自动生成可执行文件 buff_estimator_node）
 rclcpp_components_register_node(${PROJECT_NAME}_component
-  PLUGIN "BuffPredictorNode"
-  EXECUTABLE buff_predictor_node
+  PLUGIN "BuffEstimatorNode"
+  EXECUTABLE buff_estimator_node
 )
 
 #############

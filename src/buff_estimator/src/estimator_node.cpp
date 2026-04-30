@@ -15,11 +15,11 @@
 #include <algorithm>
 #include <string>
 
-class BuffPredictorNode : public rclcpp::Node
+class BuffEstimatorNode : public rclcpp::Node
 {
 public:
-    explicit BuffPredictorNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
-    : Node("buff_predictor_node", options)
+    explicit BuffEstimatorNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
+    : Node("buff_estimator_node", options)
     {
         
         predictor_ = std::make_unique<Big_Buff_Predictor>();
@@ -29,7 +29,7 @@ public:
         this->declare_parameter<std::string>("camera_frame", "camera_optical_frame");
         this->declare_parameter<bool>("debug_mode", true);
         this->declare_parameter<double>("physical_arm_length", 0.75);
-        this->declare_parameter<std::string>("debug_csv_path", "buff_predictor_debug.csv");
+        this->declare_parameter<std::string>("debug_csv_path", "buff_estimator_debug.csv");
         this->declare_parameter<int>("velocity_median_window", 3);
         this->declare_parameter<int>("radius_mean_window", 15);
         this->declare_parameter<double>("fit_window_sec", 1.5);
@@ -101,7 +101,7 @@ public:
         }
 
     }
-    ~BuffPredictorNode()
+    ~BuffEstimatorNode()
     {
         if (debug_csv_.is_open()) {
             debug_csv_.close();
@@ -388,7 +388,7 @@ private:
     std::string target_frame_;
     std::string camera_frame_;
     bool debug_mode_ = true;
-    std::string debug_csv_path_ = "buff_predictor_debug.csv";
+    std::string debug_csv_path_ = "buff_estimator_debug.csv";
     int velocity_median_window_ = 3;
     int radius_mean_window_ = 15;
     std::ofstream debug_csv_;
@@ -404,4 +404,4 @@ private:
 
 // 注册为组件
 #include "rclcpp_components/register_node_macro.hpp"
-RCLCPP_COMPONENTS_REGISTER_NODE(BuffPredictorNode)
+RCLCPP_COMPONENTS_REGISTER_NODE(BuffEstimatorNode)

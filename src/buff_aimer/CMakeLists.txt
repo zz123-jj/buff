@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(buff_solver)
+project(buff_aimer)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,7 +22,7 @@ find_package(geometry_msgs REQUIRED)
 
 # 创建共享库（组件必须为 SHARED）
 add_library(${PROJECT_NAME} SHARED
-  src/solver.cpp
+  src/aimer.cpp
 )
 
 # 设置包含目录（如果将来有头文件可启用）
@@ -44,8 +44,8 @@ ament_target_dependencies(${PROJECT_NAME}
 
 # 注册组件
 rclcpp_components_register_node(${PROJECT_NAME}
-  PLUGIN "BuffSolver"
-  EXECUTABLE buff_solver_node
+  PLUGIN "BuffAimer"
+  EXECUTABLE buff_aimer_node
 )
 
 # 安装库和可执行文件

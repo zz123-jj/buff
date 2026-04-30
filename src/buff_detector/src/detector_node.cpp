@@ -23,11 +23,13 @@ public:
     explicit BuffDetectorNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
     : Node("buff_detector_node", options)
     {
-        this->declare_parameter<std::string>("model_path", "model/Fan.onnx");
+        this->declare_parameter<std::string>("model_path", "model/yolo11_buff_int8.xml");
+        this->declare_parameter<std::string>("openvino_device", "GPU");
         this->declare_parameter<bool>("use_cuda", false);
         this->declare_parameter<double>("confidence_threshold", 0.88);
         this->declare_parameter<double>("iou_threshold", 0.5);
         this->declare_parameter<bool>("debug_mode", true);
+        this->declare_parameter<bool>("image_reliable", true);
         this->declare_parameter<double>("inside_shade_rate", 0.7);
         this->declare_parameter<double>("outside_shade_rate", 1.39);
         this->declare_parameter<std::vector<int64_t>>("hsv_limits.lower", {0, 40, 220});
@@ -42,12 +44,14 @@ public:
                 ament_index_cpp::get_package_share_directory("buff_detector") + "/" + model_path;
         }
         detector_config_.model_path = model_path;
+        detector_config_.openvino_device = this->get_parameter("openvino_device").as_string();
         detector_config_.use_cuda = this->get_parameter("use_cuda").as_bool();
         detector_config_.confidence_threshold =
             static_cast<float>(this->get_parameter("confidence_threshold").as_double());
         detector_config_.iou_threshold =
             static_cast<float>(this->get_parameter("iou_threshold").as_double());
         detector_config_.debug_mode = this->get_parameter("debug_mode").as_bool();
+        image_reliable_ = this->get_parameter("image_reliable").as_bool();
         detector_config_.inside_shade_rate =
             static_cast<float>(this->get_parameter("inside_shade_rate").as_double());
         detector_config_.outside_shade_rate =
@@ -71,10 +75,15 @@ public:
         detector_->set_config(detector_config_);
         //video_img_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/image_raw", rclcpp::QoS(rclcpp::KeepLast(1)).reliable()); 
         // 订阅图像
+        auto image_qos = rclcpp::QoS(rclcpp::KeepLast(10));
+        if (image_reliable_) {
+            image_qos.reliable();
+        } else {
+            image_qos.best_effort();
+        }
         img_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
     "/image_raw",
-    // 使用传感器数据的标准配置：Best Effort + Volatile
-    rclcpp::SensorDataQoS().keep_last(1), 
+    image_qos,
     [this](const sensor_msgs::msg::Image::SharedPtr msg) { 
         imageCallback(msg); 
     });
@@ -219,6 +228,7 @@ private:
     std::unique_ptr<BuffDetector> detector_;
     // 配置
     BuffDetectorConfig detector_config_;
+    bool image_reliable_ = true;
 
     image_transport::Publisher debug_image_pub_;
     image_transport::Publisher preprocessed_image_pub_;
@@ -240,4 +250,3 @@ int main(int argc, char** argv)
 #include "rclcpp_components/register_node_macro.hpp"
 
 RCLCPP_COMPONENTS_REGISTER_NODE(BuffDetectorNode)
-

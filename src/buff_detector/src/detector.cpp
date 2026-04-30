@@ -371,108 +371,84 @@ cv::putText(debug_frame_,
 }
 bool BuffDetector::detect_by_yolo(cv::Mat& frame)
 {
-    // 初始化yolo检测器
-    static YOLO_V8 yolo_detector;
+    // 初始化YOLOPose检测器
+    static BuffYoloPoseOpenVINO yolo_detector;
     static bool loaded = false;
     if (!loaded)
     {
-        // yolo参数
-        DL_INIT_PARAM yolo_param;
-        yolo_detector.classes = {"fan_blade", "R"};
-        yolo_param.rectConfidenceThreshold = config_.confidence_threshold;
-        yolo_param.iouThreshold = config_.iou_threshold;
-        yolo_param.modelPath = config_.model_path;
-        yolo_param.imgSize = {480, 640}; // 模型期望的输入尺寸 {height, width}
-        yolo_param.modelType = YOLO_DETECT_V8;
-        yolo_param.cudaEnable = config_.use_cuda;
-
-        char* create_ret = yolo_detector.CreateSession(yolo_param);
-        if (create_ret != RET_OK && yolo_param.cudaEnable)
+        loaded = yolo_detector.create_session(
+            config_.model_path,
+            config_.openvino_device,
+            config_.confidence_threshold
+        );
+        if (!loaded && config_.openvino_device != "CPU")
         {
             RCLCPP_WARN(
                 rclcpp::get_logger("BuffDetector"),
-                "YOLO CUDA session init failed, fallback to CPU session."
+                "YOLOPose OpenVINO %s session init failed: %s. Fallback to CPU.",
+                config_.openvino_device.c_str(),
+                yolo_detector.last_error().c_str()
             );
-            yolo_param.cudaEnable = false;
-            create_ret = yolo_detector.CreateSession(yolo_param);
+            loaded = yolo_detector.create_session(config_.model_path, "CPU", config_.confidence_threshold);
         }
 
-        if (create_ret != RET_OK)
+        if (!loaded)
         {
             RCLCPP_ERROR(
                 rclcpp::get_logger("BuffDetector"),
-                "YOLO session init failed, skip this frame."
+                "YOLOPose OpenVINO session init failed: %s",
+                yolo_detector.last_error().c_str()
             );
             return false;
         }
-        loaded = true;
     }
 
-    // 进行yolo检测
-    std::vector<DL_RESULT> output_list;
-    yolo_detector.RunSession(frame, output_list);
-
-    // 检测结果和信度列表
-    std::vector<std::pair<BBox, float>> R_detections;
-    std::vector<std::pair<BBox, float>> fan_detections;
-
-    for (const auto& output : output_list)
+    BuffPoseResult output;
+    if (!yolo_detector.run(frame, output))
     {
-        // 边界检查，确保 ROI 在图像范围内
-        int x = std::max(0, output.box.x);
-        int y = std::max(0, output.box.y);
-        int w = std::min(output.box.width, frame.cols - x);
-        int h = std::min(output.box.height, frame.rows - y);
-
-        if (w <= 0 || h <= 0)
-            continue; // 跳过无效框
-
-        BBox box(static_cast<float>(x), static_cast<float>(y), static_cast<float>(x + w), static_cast<float>(y + h));
-
-        if (output.classId == 1)
+        if (config_.debug_mode)
         {
-            fan_detections.push_back(std::make_pair(box, output.confidence));
-        }
-        else if (output.classId == 0)
-        {
-            R_detections.push_back(std::make_pair(box, output.confidence));
-        }
-    }
-
-    // 选择最高信度的检测结果作为最终结果
-    
-    if (!fan_detections.empty() && !R_detections.empty())
-    {
-        auto best_fan = std::max_element(
-            fan_detections.begin(), fan_detections.end(),
-            [](const auto& a, const auto& b) { return a.second < b.second; }
-        );
-        target_blades_.clear();
-        target_blades_.push_back(FanBlade{BBox(best_fan->first), FanBladeState::target, -1});
-
-        auto best_R = std::max_element(
-            R_detections.begin(), R_detections.end(), [](const auto& a, const auto& b) { return a.second < b.second; }
-        );
-        current_R_box_ = BBox(best_R->first);
-
-        RCLCPP_INFO(
-            rclcpp::get_logger("BuffDetector"),
-            "YOLO target detected: fan confidence=%.3f, R confidence=%.3f",
-            best_fan->second,
-            best_R->second
-        );
-        
-        return true;
-    }
-    else
-    {
-        if (config_.debug_mode) {
-            RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), 
-                "YOLO init failed (got %zu fans, %zu Rs)",
-                fan_detections.size(), R_detections.size());
+            RCLCPP_WARN(
+                rclcpp::get_logger("BuffDetector"),
+                "YOLOPose init failed: %s",
+                yolo_detector.last_error().c_str()
+            );
         }
         return false;
     }
+
+    target_blades_.clear();
+    target_blades_.push_back(FanBlade{
+        BBox(
+            static_cast<float>(output.fan_box.x),
+            static_cast<float>(output.fan_box.y),
+            static_cast<float>(output.fan_box.x + output.fan_box.width),
+            static_cast<float>(output.fan_box.y + output.fan_box.height)
+        ),
+        FanBladeState::target,
+        -1
+    });
+    current_R_box_ = BBox(
+        static_cast<float>(output.r_box.x),
+        static_cast<float>(output.r_box.y),
+        static_cast<float>(output.r_box.x + output.r_box.width),
+        static_cast<float>(output.r_box.y + output.r_box.height)
+    );
+
+    RCLCPP_INFO(
+        rclcpp::get_logger("BuffDetector"),
+        "YOLOPose target detected: confidence=%.3f, fan=(%d,%d,%d,%d), R=(%d,%d,%d,%d)",
+        output.confidence,
+        output.fan_box.x,
+        output.fan_box.y,
+        output.fan_box.width,
+        output.fan_box.height,
+        output.r_box.x,
+        output.r_box.y,
+        output.r_box.width,
+        output.r_box.height
+    );
+    return true;
 }
 
 bool BuffDetector::preprocess_image(cv::Mat& frame)
