@@ -286,6 +286,10 @@ private:
             world_model.fitted_point_world.x,
             world_model.fitted_point_world.y,
             world_model.fitted_point_world.z);
+        const Eigen::Vector3d latest_pnp(
+            world_model.latest_pnp_point_world.x,
+            world_model.latest_pnp_point_world.y,
+            world_model.latest_pnp_point_world.z);
         const double radius = world_model.circle_radius;
 
         if (!center.allFinite() || !normal.allFinite() || !observed.allFinite() ||
@@ -376,6 +380,22 @@ private:
                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 2);
         }
 
+        if (world_model.latest_pnp_valid && latest_pnp.allFinite()) {
+            std::vector<Eigen::Vector3d> pnp_points{latest_pnp};
+            std::vector<cv::Point2f> pnp_pixels;
+            std::vector<bool> pnp_visible;
+            projectWorldPoints(pnp_points, camera_from_model, pnp_pixels, pnp_visible);
+            if (!pnp_pixels.empty() && !pnp_visible.empty() && pnp_visible.front()) {
+                const cv::Scalar color = world_model.latest_pnp_used_for_angle
+                    ? cv::Scalar(0, 255, 255)
+                    : cv::Scalar(0, 128, 255);
+                cv::circle(image, pnp_pixels.front(), 9, color, 2, cv::LINE_AA);
+                cv::putText(
+                    image, "pnp", pnp_pixels.front() + cv::Point2f(8.0f, 28.0f),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, color, 2);
+            }
+        }
+
         if (visible[3]) {
             cv::circle(image, pixels[3], 6, cv::Scalar(0, 255, 0), -1, cv::LINE_AA);
             cv::putText(
@@ -401,6 +421,8 @@ private:
         const std::string text = "world circle " + mode +
             " r=" + std::to_string(radius).substr(0, 5) +
             " angle=" + std::to_string(world_model.current_angle).substr(0, 6) +
+            " dir=" + std::to_string(static_cast<int>(world_model.spin_direction)) +
+            " pnp=" + std::to_string(world_model.latest_pnp_used_for_angle ? 1 : 0) +
             " obs_age=" + std::to_string(world_model.seconds_since_observation).substr(0, 4);
         cv::putText(
             image, text, cv::Point(20, 36),

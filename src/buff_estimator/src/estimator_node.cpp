@@ -1,5 +1,6 @@
 #include "predictor.hpp"
 #include "world_model.hpp"
+#include "dataProcessor.hpp"
 
 #include "buff_interfaces/msg/buff_target.hpp"
 #include "buff_interfaces/msg/buff_world_model.hpp"
@@ -28,7 +29,13 @@
 
 namespace
 {
+constexpr double kBladeInterval = 2.0 * M_PI / 5.0;
 constexpr double kSmallBuffAngularSpeed = M_PI / 3.0;
+constexpr int kDirectionMinSamples = 4;
+constexpr double kDirectionMinTotalAngleRad = 0.08;
+constexpr double kDirectionMinStepRad = 0.003;
+constexpr double kDirectionMaxStepRad = 0.45;
+constexpr double kDirectionMaxSampleGapSec = 0.30;
 
 Eigen::Quaterniond transformRotationToEigen(const geometry_msgs::msg::TransformStamped& transform)
 {
@@ -177,28 +184,21 @@ private:
         this->declare_parameter<bool>("debug_mode", true);
         this->declare_parameter<std::string>("debug_csv_path", "buff_estimator_debug.csv");
         this->declare_parameter<std::string>("debug_points_csv_path", "buff_estimator_points_debug.csv");
-        this->declare_parameter<double>("max_reprojection_error_px", 12.0);
         this->declare_parameter<double>("geometry_buffer_sec", 5.0);
         this->declare_parameter<int>("geometry_min_samples", 20);
         this->declare_parameter<double>("geometry_min_span_sec", 1.0);
-        this->declare_parameter<double>("max_model_residual_m", 0.25);
         this->declare_parameter<double>("max_plane_rms_m", 0.08);
         this->declare_parameter<double>("max_circle_rms_m", 0.10);
         this->declare_parameter<double>("min_fit_angle_span_rad", 0.75);
         this->declare_parameter<double>("pnp_normal_weight", 0.85);
         this->declare_parameter<double>("known_circle_radius_m", 0.75);
         this->declare_parameter<double>("model_publish_rate_hz", 60.0);
-        this->declare_parameter<int>("rotation_direction", 1);
         this->declare_parameter<bool>("use_plane_constrained_points", true);
         this->declare_parameter<double>("plane_normal_alpha", 0.08);
         this->declare_parameter<double>("plane_offset_alpha", 0.05);
-        this->declare_parameter<bool>("continuity_gate_enabled", true);
-        this->declare_parameter<double>("max_observation_jump_m", 0.55);
-        this->declare_parameter<double>("continuity_reset_sec", 0.35);
-        this->declare_parameter<double>("max_angle_correction_rad", 0.60);
-        this->declare_parameter<double>("phase_reacquire_timeout_sec", 0.75);
         this->declare_parameter<double>("angle_correction_alpha", 0.25);
         this->declare_parameter<double>("max_angle_correction_step_rad", 0.10);
+        this->declare_parameter<double>("speed_refit_no_observation_sec", 0.50);
         this->declare_parameter<int>("velocity_median_window", 3);
         this->declare_parameter<double>("velocity_sample_window_sec", 4.0);
         this->declare_parameter<double>("max_velocity_sample_abs", 8.0);
@@ -228,33 +228,24 @@ private:
         debug_mode_ = this->get_parameter("debug_mode").as_bool();
         debug_csv_path_ = this->get_parameter("debug_csv_path").as_string();
         debug_points_csv_path_ = this->get_parameter("debug_points_csv_path").as_string();
-        max_reprojection_error_px_ = this->get_parameter("max_reprojection_error_px").as_double();
         geometry_buffer_sec_ = this->get_parameter("geometry_buffer_sec").as_double();
         geometry_min_samples_ = this->get_parameter("geometry_min_samples").as_int();
         geometry_min_span_sec_ = this->get_parameter("geometry_min_span_sec").as_double();
-        max_model_residual_m_ = this->get_parameter("max_model_residual_m").as_double();
         max_plane_rms_m_ = this->get_parameter("max_plane_rms_m").as_double();
         max_circle_rms_m_ = this->get_parameter("max_circle_rms_m").as_double();
         min_fit_angle_span_rad_ = this->get_parameter("min_fit_angle_span_rad").as_double();
         pnp_normal_weight_ = this->get_parameter("pnp_normal_weight").as_double();
         known_circle_radius_m_ = this->get_parameter("known_circle_radius_m").as_double();
         model_publish_rate_hz_ = this->get_parameter("model_publish_rate_hz").as_double();
-        const int rotation_direction = this->get_parameter("rotation_direction").as_int();
-        configured_spin_direction_ = rotation_direction < 0 ? -1 : 1;
-        world_spin_direction_ = configured_spin_direction_;
         use_plane_constrained_points_ =
             this->get_parameter("use_plane_constrained_points").as_bool();
         plane_normal_alpha_ = this->get_parameter("plane_normal_alpha").as_double();
         plane_offset_alpha_ = this->get_parameter("plane_offset_alpha").as_double();
-        continuity_gate_enabled_ = this->get_parameter("continuity_gate_enabled").as_bool();
-        max_observation_jump_m_ = this->get_parameter("max_observation_jump_m").as_double();
-        continuity_reset_sec_ = this->get_parameter("continuity_reset_sec").as_double();
-        max_angle_correction_rad_ = this->get_parameter("max_angle_correction_rad").as_double();
-        phase_reacquire_timeout_sec_ =
-            this->get_parameter("phase_reacquire_timeout_sec").as_double();
         angle_correction_alpha_ = this->get_parameter("angle_correction_alpha").as_double();
         max_angle_correction_step_rad_ =
             this->get_parameter("max_angle_correction_step_rad").as_double();
+        speed_refit_no_observation_sec_ =
+            this->get_parameter("speed_refit_no_observation_sec").as_double();
         velocity_median_window_ = this->get_parameter("velocity_median_window").as_int();
         velocity_sample_window_sec_ = this->get_parameter("velocity_sample_window_sec").as_double();
         max_velocity_sample_abs_ = this->get_parameter("max_velocity_sample_abs").as_double();
@@ -599,71 +590,137 @@ private:
 
     double alignThetaToReference(double theta, double reference_theta, int& blade_shift) const
     {
+        theta = buff_estimator::unwrapAngle(theta, reference_theta);
+
+        double best_theta = theta;
+        double best_abs_diff = std::abs(theta - reference_theta);
         blade_shift = 0;
-        return buff_estimator::unwrapAngle(theta, reference_theta);
+        for (int k = -5; k <= 5; ++k) {
+            const double candidate = theta + static_cast<double>(k) * kBladeInterval;
+            const double abs_diff = std::abs(candidate - reference_theta);
+            if (abs_diff < best_abs_diff) {
+                best_abs_diff = abs_diff;
+                best_theta = candidate;
+                blade_shift = k;
+            }
+        }
+        return best_theta;
     }
 
-    bool acceptModelPhaseObservation(
-        double now,
-        const Eigen::Vector3d& p_world,
-        double& angle_error)
+    double foldedBladeEquivalentDelta(double theta, double reference_theta) const
     {
-        angle_error = 0.0;
-        if (!circle_model_.valid || !has_last_angle_ || max_angle_correction_rad_ <= 0.0) {
-            return true;
+        double delta = buff_estimator::unwrapAngle(theta, reference_theta) - reference_theta;
+        while (delta > 0.5 * kBladeInterval) {
+            delta -= kBladeInterval;
         }
-        if (has_last_yolo_observation_ && phase_reacquire_timeout_sec_ > 0.0 &&
-            now - last_yolo_observation_time_ > phase_reacquire_timeout_sec_) {
-            return true;
+        while (delta < -0.5 * kBladeInterval) {
+            delta += kBladeInterval;
+        }
+        return delta;
+    }
+
+    void resetSpinDirectionEstimate()
+    {
+        world_spin_direction_ = 0;
+        has_direction_reference_ = false;
+        direction_reference_theta_ = 0.0;
+        direction_reference_time_ = 0.0;
+        direction_delta_sum_ = 0.0;
+        direction_sample_count_ = 0;
+    }
+
+    void updateSpinDirectionEstimate(double now, double theta)
+    {
+        if (world_spin_direction_ != 0) {
+            return;
         }
 
-        const double reference_theta = predictedAngleAt(now);
-        int blade_shift = 0;
-        const double observed_theta = alignThetaToReference(
-            buff_estimator::WorldCircleFitter::angleOf(circle_model_, p_world),
-            reference_theta,
-            blade_shift);
-        angle_error = std::abs(observed_theta - reference_theta);
-        if (angle_error > max_angle_correction_rad_) {
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 1000,
-                "Reject YOLO phase outlier: angle_error=%.3f rad limit=%.3f rad blade_shift=%d",
-                angle_error, max_angle_correction_rad_, blade_shift);
-            return false;
+        if (!has_direction_reference_) {
+            direction_reference_theta_ = theta;
+            direction_reference_time_ = now;
+            has_direction_reference_ = true;
+            return;
         }
-        return true;
+
+        const double previous_theta = direction_reference_theta_;
+        const double previous_time = direction_reference_time_;
+        direction_reference_theta_ = theta;
+        direction_reference_time_ = now;
+
+        const double dt = now - previous_time;
+        if (dt <= 1e-4) {
+            return;
+        }
+        if (dt > kDirectionMaxSampleGapSec) {
+            direction_delta_sum_ = 0.0;
+            direction_sample_count_ = 0;
+            return;
+        }
+
+        const double delta = foldedBladeEquivalentDelta(theta, previous_theta);
+        if (!std::isfinite(delta) ||
+            std::abs(delta) < kDirectionMinStepRad ||
+            std::abs(delta) > kDirectionMaxStepRad) {
+            return;
+        }
+
+        direction_delta_sum_ += delta;
+        ++direction_sample_count_;
+        if (direction_sample_count_ >= kDirectionMinSamples &&
+            std::abs(direction_delta_sum_) >= kDirectionMinTotalAngleRad) {
+            world_spin_direction_ = direction_delta_sum_ > 0.0 ? 1 : -1;
+            RCLCPP_INFO(
+                this->get_logger(),
+                "Buff spin direction estimated as %s in world circle angle, samples=%d delta_sum=%.3f rad",
+                world_spin_direction_ > 0 ? "positive" : "negative",
+                direction_sample_count_,
+                direction_delta_sum_);
+        }
     }
 
     bool updateAngularState(double now, const Eigen::Vector3d& p_world, int8_t mode)
     {
         if (!circle_model_.valid) {
+            last_pnp_used_for_angle_ = false;
             return false;
         }
 
         double theta = buff_estimator::WorldCircleFitter::angleOf(circle_model_, p_world);
+        updateSpinDirectionEstimate(now, theta);
+
+        last_pnp_raw_angle_ = theta;
+        last_pnp_continuous_angle_ = theta;
+        last_pnp_blade_shift_ = 0;
         bool blade_jump = false;
         if (has_last_angle_) {
             int blade_shift = 0;
             const double predicted_theta = predictedAngleAt(now);
             const double observed_theta = alignThetaToReference(theta, predicted_theta, blade_shift);
+            last_pnp_continuous_angle_ = observed_theta;
+            last_pnp_blade_shift_ = blade_shift;
             blade_jump = blade_shift != 0;
-            const double phase_error = observed_theta - predicted_theta;
-            const double alpha = std::clamp(angle_correction_alpha_, 0.0, 1.0);
-            double correction = alpha * phase_error;
-            if (max_angle_correction_step_rad_ > 0.0) {
-                correction = std::clamp(
-                    correction,
-                    -max_angle_correction_step_rad_,
-                    max_angle_correction_step_rad_);
+            if (world_spin_direction_ == 0) {
+                theta = observed_theta;
+            } else {
+                const double phase_error = observed_theta - predicted_theta;
+                const double alpha = std::clamp(angle_correction_alpha_, 0.0, 1.0);
+                double correction = alpha * phase_error;
+                if (max_angle_correction_step_rad_ > 0.0) {
+                    correction = std::clamp(
+                        correction,
+                        -max_angle_correction_step_rad_,
+                        max_angle_correction_step_rad_);
+                }
+                theta = predicted_theta + correction;
             }
-            theta = predicted_theta + correction;
 
             const double dt = now - last_angle_time_;
             if (dt > 1e-4) {
                 const double omega = (observed_theta - last_theta_) / dt;
-                if (!blade_jump && std::abs(omega) < max_velocity_sample_abs_) {
-                    last_velocity_ =
-                        static_cast<double>(configured_spin_direction_) * std::abs(omega);
+                if (std::abs(omega) < max_velocity_sample_abs_) {
+                    last_velocity_ = world_spin_direction_ == 0
+                        ? 0.0
+                        : static_cast<double>(world_spin_direction_) * std::abs(omega);
                     const float filtered_abs_velocity =
                         velocity_median_filter_->update(static_cast<float>(std::abs(omega)));
 
@@ -690,45 +747,43 @@ private:
         last_theta_ = theta;
         last_angle_time_ = now;
         last_blade_jump_ = blade_jump;
+        last_pnp_used_for_angle_ = true;
         return true;
     }
 
-    bool acceptContinuousObservation(double now, const Eigen::Vector3d& p_world)
+    void resetSpeedFitState()
     {
-        if (!continuity_gate_enabled_) {
-            last_accepted_world_point_ = p_world;
-            last_accepted_observation_time_ = now;
-            has_last_accepted_observation_ = true;
-            return true;
+        predictor_->reset();
+        velocity_median_filter_ =
+            std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
+        has_last_angle_ = false;
+        has_fit_start_time_ = false;
+        fit_start_time_ = 0.0;
+        last_theta_ = 0.0;
+        last_angle_time_ = 0.0;
+        last_velocity_ = 0.0;
+        last_blade_jump_ = false;
+        last_pnp_used_for_angle_ = false;
+        last_pnp_raw_angle_ = 0.0;
+        last_pnp_continuous_angle_ = 0.0;
+        last_pnp_blade_shift_ = 0;
+    }
+
+    void handleMissingObservation(const rclcpp::Time& stamp)
+    {
+        if (!has_last_yolo_observation_ || speed_refit_no_observation_sec_ <= 0.0) {
+            return;
         }
 
-        if (!has_last_accepted_observation_ ||
-            now - last_accepted_observation_time_ > continuity_reset_sec_) {
-            if (has_last_accepted_observation_ && !circle_model_.valid) {
-                point_buffer_.clear();
-                RCLCPP_WARN_THROTTLE(
-                    this->get_logger(), *this->get_clock(), 1000,
-                    "Reset pre-model geometry buffer after YOLO continuity gap %.3f s",
-                    now - last_accepted_observation_time_);
-            }
-            last_accepted_world_point_ = p_world;
-            last_accepted_observation_time_ = now;
-            has_last_accepted_observation_ = true;
-            return true;
+        const double now = stamp.seconds();
+        const double gap = now - last_yolo_observation_time_;
+        if (gap > speed_refit_no_observation_sec_ && !speed_refit_pending_) {
+            resetSpeedFitState();
+            speed_refit_pending_ = true;
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Reset buff speed fit after %.3f s without YOLO-PnP observation.", gap);
         }
-
-        const double jump = (p_world - last_accepted_world_point_).norm();
-        if (jump > max_observation_jump_m_) {
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 1000,
-                "Reject discontinuous YOLO observation: jump=%.3f m limit=%.3f m",
-                jump, max_observation_jump_m_);
-            return false;
-        }
-
-        last_accepted_world_point_ = p_world;
-        last_accepted_observation_time_ = now;
-        return true;
     }
 
     double integrateAbsAngularSpeed(double from_time, double to_time) const
@@ -778,7 +833,7 @@ private:
         }
 
         return last_theta_ +
-            static_cast<double>(configured_spin_direction_) *
+            static_cast<double>(world_spin_direction_) *
                 integrateAbsAngularSpeed(last_angle_time_, stamp_sec);
     }
 
@@ -786,6 +841,8 @@ private:
         double now,
         const Eigen::Vector3d& p_world,
         const Eigen::Vector3d& p_camera,
+        double reprojection_error,
+        bool used_for_angle,
         double confidence,
         int yolo_target_count)
     {
@@ -796,6 +853,9 @@ private:
         last_observation_confidence_ = confidence;
         last_yolo_target_count_ = yolo_target_count;
         last_observed_depth_ = p_camera.z();
+        last_pnp_reprojection_error_ = reprojection_error;
+        last_pnp_used_for_angle_ = used_for_angle;
+        speed_refit_pending_ = false;
     }
 
     buff_interfaces::msg::BuffWorldModel makeWorldModelMessage(
@@ -843,6 +903,16 @@ private:
             has_observation || !has_last_yolo_observation_
                 ? observed_camera.z()
                 : last_observed_depth_);
+        model_msg.latest_pnp_valid = has_last_yolo_observation_;
+        model_msg.latest_pnp_used_for_angle = last_pnp_used_for_angle_;
+        model_msg.latest_pnp_point_world = toPointMsg(last_observed_world_point_);
+        model_msg.latest_pnp_point_camera = toPointMsg(last_observed_camera_point_);
+        model_msg.latest_pnp_reprojection_error =
+            static_cast<float>(last_pnp_reprojection_error_);
+        model_msg.latest_pnp_raw_angle = static_cast<float>(last_pnp_raw_angle_);
+        model_msg.latest_pnp_continuous_angle =
+            static_cast<float>(last_pnp_continuous_angle_);
+        model_msg.latest_pnp_blade_shift = last_pnp_blade_shift_;
 
         if (circle_model_.valid) {
             model_msg.circle_center_world = toPointMsg(circle_model_.center);
@@ -891,7 +961,12 @@ private:
     {
         const rclcpp::Time stamp(msg->header.stamp);
 
-        if (!msg->is_tracking || !msg->has_target_keypoints || !has_cam_info_) {
+        if (!msg->is_tracking || !msg->has_target_keypoints) {
+            handleMissingObservation(stamp);
+            return;
+        }
+
+        if (!has_cam_info_) {
             return;
         }
 
@@ -904,12 +979,6 @@ private:
         Eigen::Vector3d normal_camera;
         double reprojection_error = 0.0;
         if (!solvePnpHitPoint(*msg, p_camera, normal_camera, reprojection_error)) {
-            return;
-        }
-        if (reprojection_error > max_reprojection_error_px_) {
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 1000,
-                "Reject PnP observation: reprojection_error=%.2f px", reprojection_error);
             return;
         }
 
@@ -930,51 +999,23 @@ private:
             constrainPointToObservationPlane(image_center, msg->header.stamp, p_world);
 
         const double now = rclcpp::Time(msg->header.stamp).seconds();
-        double phase_angle_error = 0.0;
-        if (!acceptModelPhaseObservation(now, p_world, phase_angle_error)) {
-            writePointDebugRow(
-                now, false, plane_constrained ? "phase_outlier_plane" : "phase_outlier_raw",
-                raw_p_world, p_world, normal_world, p_camera, reprojection_error,
-                msg->pose_confidence, msg->yolo_target_count);
-            return;
-        }
-
-        if (!acceptContinuousObservation(now, p_world)) {
-            writePointDebugRow(
-                now, false, plane_constrained ? "discontinuous_plane" : "discontinuous_raw",
-                raw_p_world, p_world, normal_world, p_camera, reprojection_error,
-                msg->pose_confidence, msg->yolo_target_count);
-            return;
-        }
-
-        if (!circle_model_.valid ||
-            max_model_residual_m_ <= 0.0 ||
-            buff_estimator::WorldCircleFitter::radialResidual(circle_model_, p_world) < max_model_residual_m_) {
-            point_buffer_.push(now, p_world, normal_world, msg->pose_confidence);
-            writePointDebugRow(
-                now, true, plane_constrained ? "used_plane" : "used_raw",
-                raw_p_world, p_world, normal_world, p_camera, reprojection_error,
-                msg->pose_confidence, msg->yolo_target_count);
-        } else {
-            writePointDebugRow(
-                now, false, plane_constrained ? "model_outlier_plane" : "model_outlier_raw",
-                raw_p_world, p_world, normal_world, p_camera, reprojection_error,
-                msg->pose_confidence, msg->yolo_target_count);
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 1000,
-                "Skip outlier point for circle model, residual=%.3f",
-                buff_estimator::WorldCircleFitter::radialResidual(circle_model_, p_world));
-            return;
-        }
+        point_buffer_.push(now, p_world, normal_world, msg->pose_confidence);
+        writePointDebugRow(
+            now, true, plane_constrained ? "used_pnp_plane" : "used_pnp_raw",
+            raw_p_world, p_world, normal_world, p_camera, reprojection_error,
+            msg->pose_confidence, msg->yolo_target_count);
 
         tryUpdateCircleModel(now);
+
         const bool has_angle = updateAngularState(now, p_world, msg->is_bigbuff);
+
+        rememberObservation(
+            now, p_world, p_camera, reprojection_error, has_angle,
+            msg->pose_confidence, msg->yolo_target_count);
+
         if (!has_angle) {
             return;
         }
-
-        rememberObservation(
-            now, p_world, p_camera, msg->pose_confidence, msg->yolo_target_count);
 
         auto model_msg = makeWorldModelMessage(
             stamp, msg->is_bigbuff, true,
@@ -1018,18 +1059,21 @@ private:
         last_theta_ = 0.0;
         last_angle_time_ = 0.0;
         last_velocity_ = 0.0;
-        world_spin_direction_ = configured_spin_direction_;
+        resetSpinDirectionEstimate();
         last_blade_jump_ = false;
-        has_last_accepted_observation_ = false;
         has_last_yolo_observation_ = false;
-        last_accepted_observation_time_ = 0.0;
         last_yolo_observation_time_ = 0.0;
-        last_accepted_world_point_ = Eigen::Vector3d::Zero();
         last_observed_world_point_ = Eigen::Vector3d::Zero();
         last_observed_camera_point_ = Eigen::Vector3d::Zero();
         last_observation_confidence_ = 0.0;
         last_yolo_target_count_ = 0;
         last_observed_depth_ = 0.0;
+        last_pnp_reprojection_error_ = 0.0;
+        last_pnp_raw_angle_ = 0.0;
+        last_pnp_continuous_angle_ = 0.0;
+        last_pnp_blade_shift_ = 0;
+        last_pnp_used_for_angle_ = false;
+        speed_refit_pending_ = false;
         has_observation_plane_ = false;
         observation_plane_normal_ = Eigen::Vector3d::UnitZ();
         observation_plane_offset_ = 0.0;
@@ -1135,11 +1179,9 @@ private:
     std::ofstream point_debug_csv_;
 
     bool has_cam_info_ = false;
-    double max_reprojection_error_px_ = 12.0;
     double geometry_buffer_sec_ = 5.0;
     int geometry_min_samples_ = 20;
     double geometry_min_span_sec_ = 1.0;
-    double max_model_residual_m_ = 0.25;
     double max_plane_rms_m_ = 0.08;
     double max_circle_rms_m_ = 0.10;
     double min_fit_angle_span_rad_ = 0.75;
@@ -1149,13 +1191,9 @@ private:
     bool use_plane_constrained_points_ = true;
     double plane_normal_alpha_ = 0.08;
     double plane_offset_alpha_ = 0.05;
-    bool continuity_gate_enabled_ = true;
-    double max_observation_jump_m_ = 0.55;
-    double continuity_reset_sec_ = 0.35;
-    double max_angle_correction_rad_ = 0.60;
-    double phase_reacquire_timeout_sec_ = 0.75;
     double angle_correction_alpha_ = 0.25;
     double max_angle_correction_step_rad_ = 0.10;
+    double speed_refit_no_observation_sec_ = 0.50;
 
     int velocity_median_window_ = 3;
     double velocity_sample_window_sec_ = 4.0;
@@ -1169,15 +1207,15 @@ private:
     std::array<double, 2> fit_phi_range_{-M_PI, M_PI};
 
     int8_t last_mode_ = 0;
-    int8_t configured_spin_direction_ = 1;
-    int8_t world_spin_direction_ = 1;
+    int8_t world_spin_direction_ = 0;
     bool has_last_angle_ = false;
     bool has_fit_start_time_ = false;
-    bool has_last_accepted_observation_ = false;
     bool has_last_yolo_observation_ = false;
     bool has_observation_plane_ = false;
+    bool has_direction_reference_ = false;
     bool last_blade_jump_ = false;
-    Eigen::Vector3d last_accepted_world_point_ = Eigen::Vector3d::Zero();
+    bool last_pnp_used_for_angle_ = false;
+    bool speed_refit_pending_ = false;
     Eigen::Vector3d last_observed_world_point_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d last_observed_camera_point_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d observation_plane_normal_ = Eigen::Vector3d::UnitZ();
@@ -1188,9 +1226,16 @@ private:
     double last_theta_ = 0.0;
     double last_angle_time_ = 0.0;
     double last_velocity_ = 0.0;
-    double last_accepted_observation_time_ = 0.0;
+    double direction_reference_theta_ = 0.0;
+    double direction_reference_time_ = 0.0;
+    double direction_delta_sum_ = 0.0;
     double last_yolo_observation_time_ = 0.0;
+    double last_pnp_reprojection_error_ = 0.0;
+    double last_pnp_raw_angle_ = 0.0;
+    double last_pnp_continuous_angle_ = 0.0;
     double observation_plane_offset_ = 0.0;
+    int direction_sample_count_ = 0;
+    int last_pnp_blade_shift_ = 0;
 };
 
 #include "rclcpp_components/register_node_macro.hpp"
