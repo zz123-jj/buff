@@ -11,6 +11,7 @@
   <exec_depend>buff_detector</exec_depend>
   <exec_depend>buff_estimator</exec_depend>
   <exec_depend>buff_aimer</exec_depend>
+  <exec_depend>buff_debug_visualizer</exec_depend>
   <exec_depend>camera</exec_depend>
   <exec_depend>gimbal_tf_publisher</exec_depend>
   <exec_depend>rclcpp_components</exec_depend>

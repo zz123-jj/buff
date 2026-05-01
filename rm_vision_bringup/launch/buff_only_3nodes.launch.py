@@ -36,8 +36,17 @@ def generate_launch_description():
         output='screen',
     )
 
+    buff_debug_visualizer = Node(
+        package='buff_debug_visualizer',
+        executable='buff_debug_visualizer_node',
+        name='buff_debug_visualizer_node',
+        parameters=[buff_param],
+        output='screen',
+    )
+
     return LaunchDescription([
         buff_detector,
         buff_estimator,
         buff_aimer,
+        buff_debug_visualizer,
     ])

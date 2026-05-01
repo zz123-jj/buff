@@ -10,6 +10,25 @@ namespace
 {
 constexpr float kMinRBoxSize = 8.0f;
 constexpr int kRThreshold = 100;
+constexpr float kNmsThreshold = 0.45f;
+
+struct PoseCandidate
+{
+    float confidence = 0.0f;
+    std::vector<cv::Point2f> keypoints;
+    cv::Rect fan_box;
+};
+
+float rect_iou(const cv::Rect& a, const cv::Rect& b)
+{
+    const int intersection = (a & b).area();
+    const int union_area = a.area() + b.area() - intersection;
+    if (union_area <= 0)
+    {
+        return 0.0f;
+    }
+    return static_cast<float>(intersection) / static_cast<float>(union_area);
+}
 
 template<typename T>
 std::vector<float> tensor_to_float_vector(const ov::Tensor& tensor)
@@ -68,12 +87,11 @@ bool BuffYoloPoseOpenVINO::run(const cv::Mat& bgr_image, BuffPoseResult& result)
         infer_request_.infer();
 
         BuffPoseResult parsed;
-        if (!parse_output(infer_request_.get_output_tensor(), scale_factor, parsed))
+        if (!parse_output(infer_request_.get_output_tensor(), scale_factor, bgr_image.size(), parsed))
         {
             return false;
         }
 
-        parsed.fan_box = keypoints_to_rect(parsed.keypoints, 0, 4, bgr_image.size());
         parsed.r_box = detect_r_box(parsed.keypoints, bgr_image);
         if (parsed.fan_box.area() <= 0 || parsed.r_box.area() <= 0)
         {
@@ -124,6 +142,7 @@ float BuffYoloPoseOpenVINO::fill_tensor(const cv::Mat& bgr_image)
 bool BuffYoloPoseOpenVINO::parse_output(
     const ov::Tensor& output_tensor,
     float scale_factor,
+    const cv::Size& image_size,
     BuffPoseResult& result
 )
 {
@@ -199,38 +218,68 @@ bool BuffYoloPoseOpenVINO::parse_output(
         return values[candidate * feature_count + feature];
     };
 
-    float best_confidence = -std::numeric_limits<float>::infinity();
-    std::size_t best_candidate = 0;
+    std::vector<PoseCandidate> candidates;
     for (std::size_t candidate = 0; candidate < candidate_count; ++candidate)
     {
         const float confidence = at(4, candidate);
-        if (confidence > best_confidence)
+        if (confidence < confidence_threshold_)
         {
-            best_confidence = confidence;
-            best_candidate = candidate;
+            continue;
         }
+
+        PoseCandidate pose;
+        pose.confidence = confidence;
+        pose.keypoints.reserve(keypoint_count_);
+        for (std::size_t i = 0; i < keypoint_count_; ++i)
+        {
+            pose.keypoints.emplace_back(
+                at(5 + i * 2, candidate) * scale_factor,
+                at(5 + i * 2 + 1, candidate) * scale_factor
+            );
+        }
+
+        pose.fan_box = keypoints_to_rect(pose.keypoints, 0, 4, image_size);
+        if (pose.fan_box.area() <= 0)
+        {
+            continue;
+        }
+        candidates.push_back(std::move(pose));
     }
 
-    if (best_confidence < confidence_threshold_)
+    if (candidates.empty())
     {
         std::ostringstream oss;
-        oss << "best confidence " << best_confidence
-            << " below threshold " << confidence_threshold_;
+        oss << "no pose candidate above threshold " << confidence_threshold_;
         last_error_ = oss.str();
         return false;
     }
 
-    result.confidence = best_confidence;
-    result.keypoints.clear();
-    result.keypoints.reserve(keypoint_count_);
-    for (std::size_t i = 0; i < keypoint_count_; ++i)
+    std::sort(candidates.begin(), candidates.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.confidence > rhs.confidence;
+    });
+
+    std::vector<PoseCandidate> kept;
+    for (auto& candidate : candidates)
     {
-        result.keypoints.emplace_back(
-            at(5 + i * 2, best_candidate) * scale_factor,
-            at(5 + i * 2 + 1, best_candidate) * scale_factor
-        );
+        bool suppressed = false;
+        for (const auto& accepted : kept)
+        {
+            if (rect_iou(candidate.fan_box, accepted.fan_box) > kNmsThreshold)
+            {
+                suppressed = true;
+                break;
+            }
+        }
+        if (!suppressed)
+        {
+            kept.push_back(std::move(candidate));
+        }
     }
 
+    result.confidence = kept.front().confidence;
+    result.keypoints = kept.front().keypoints;
+    result.fan_box = kept.front().fan_box;
+    result.target_count = static_cast<int>(kept.size());
     return true;
 }
 

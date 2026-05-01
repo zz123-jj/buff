@@ -13,6 +13,7 @@ struct BuffPoseResult
     std::vector<cv::Point2f> keypoints;
     cv::Rect fan_box;
     cv::Rect r_box;
+    int target_count = 0;
 };
 
 class BuffYoloPoseOpenVINO
@@ -31,7 +32,12 @@ public:
 
 private:
     float fill_tensor(const cv::Mat& bgr_image);
-    bool parse_output(const ov::Tensor& output_tensor, float scale_factor, BuffPoseResult& result);
+    bool parse_output(
+        const ov::Tensor& output_tensor,
+        float scale_factor,
+        const cv::Size& image_size,
+        BuffPoseResult& result
+    );
     cv::Rect keypoints_to_rect(
         const std::vector<cv::Point2f>& keypoints,
         std::size_t begin,

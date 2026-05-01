@@ -1,6 +1,8 @@
 #include "buff_detector/detector.hpp"
 #include "buff_detector/yolo_inference.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <unordered_map>
 #include <rclcpp/logger.hpp>
@@ -229,145 +231,13 @@ void BBox::move_by(float x, float y)
 }
 bool BuffDetector::init(cv::Mat& frame)
 {
-   
-    /* 使用yolo模型检测初始位置
-    初始化current_R_box_和target_fan_blades_*/
-    if (!detect_by_yolo(frame))
-    {
-        return false;
-    }
-
-    // 初始化扇叶列表
-    blade_list_.clear();
-    for (size_t i = 0; i < 5; i++)
-    {
-        blade_list_.push_back(FanBlade{BBox(), FanBladeState::unlighted, static_cast<int>(i)});
-    }
-
-    // 初始化上一帧R标位置
-    last_R_box_ = current_R_box_;
-
-    // 初始化亮起扇叶数量
-    lighted_blade_num_ = 0;
     reset_spin_direction_state();
-
-    // 计算能量机关半径
-    if (target_blades_.empty())
-    {
-        RCLCPP_ERROR(rclcpp::get_logger("BuffDetector"), "No target fan blade after YOLO init.");
-        return false;
-    }
-    buff_radius_ = euclidean_distance(current_R_box_.get_center_2f(), target_blades_.front().box.get_center_2f());
-
-    try
-    {
-        preprocess_image(frame);
-    }
-    catch (const cv::Exception& e)
-    {
-        RCLCPP_ERROR(rclcpp::get_logger("BuffDetector"), "OpenCV exception during image preprocessing: %s", e.what());
-        return false; // 处理异常情况，避免崩溃
-    }
-    if (!update_R_box(frame, true))
-    {
-        RCLCPP_WARN(rclcpp::get_logger("BuffDetector"), "Failed to update R box during initialization");
-        return false;
-    }
-
-    return true;
+    return detect_by_yolo(frame);
 }
 
 bool BuffDetector::update(cv::Mat& frame)
 {
-    // 调试模式下保存当前帧图像
-    if (config_.debug_mode)
-    {
-        debug_frame_ = frame.clone();
-    }
-
-    // 预处理图像
-    try
-    {
-        preprocess_image(frame);
-    }
-    catch (const cv::Exception& e)
-    {
-        RCLCPP_ERROR(rclcpp::get_logger("BuffDetector"), "OpenCV exception during image preprocessing: %s", e.what());
-        return false; // 处理异常情况，避免崩溃
-    }
-
-    // 识别扇叶和R标
-    bool r_box_ok = update_R_box(frame);
-    bool fan_blades_ok = update_fan_blades(frame);
-    //防止update fan blades失败导致target_blades_空 导致front越界
-    if(!target_blades_.empty()){
-    buff_radius_ = euclidean_distance(current_R_box_.get_center_2f(), target_blades_.front().box.get_center_2f());
-    }
-    if (r_box_ok && fan_blades_ok)
-    {
-        lost_frame_count_ = 0; // 重置丢帧计数
-    }
-    else
-    {
-        lost_frame_count_++;
-        if (config_.debug_mode && lost_frame_count_ <= 3) {
-            RCLCPP_DEBUG(rclcpp::get_logger("BuffDetector"), 
-                "Tracking failed (R_box: %s, Fan_blades: %s, lost_count: %d/%d)",
-                r_box_ok ? "OK" : "FAIL", fan_blades_ok ? "OK" : "FAIL",
-                lost_frame_count_, config_.max_lost_frame);
-        }
-    }
-
-    //显示调试信息
-    if (config_.debug_mode)
-    { 
-auto now = std::chrono::system_clock::now();
-auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-
-// 直接转换成字符串显示
-cv::putText(debug_frame_, 
-            std::to_string(ms), 
-            cv::Point(20, 50), 
-            cv::FONT_HERSHEY_SIMPLEX, 
-            0.8, 
-            cv::Scalar(0, 255, 0), 
-            2);                       // 线宽
-        // 显示R标框
-        cv::rectangle(
-            debug_frame_, current_R_box_.get_point_min(), current_R_box_.get_point_max(), cv::Scalar(255, 255, 0), 2
-        );
-        // 显示扇叶
-        for (const auto& fan_blade : blade_list_)
-        {
-            if (fan_blade.state == FanBladeState::unlighted)
-            {
-            cv::rectangle(
-                debug_frame_, fan_blade.box.get_point_min(), fan_blade.box.get_point_max(), cv::Scalar(0, 0, 255), 2
-            );
-        }
-            cv::putText(
-                debug_frame_,
-                "id = " + std::to_string(fan_blade.id) + " | " +
-                    (fan_blade.state == FanBladeState::target
-                         ? "target"
-                         : (fan_blade.state == FanBladeState::shotted ? "shotted" : "unlighted")),
-                fan_blade.box.get_center_2i(), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2
-            );
-        }
-    }
-
-    if (lost_frame_count_ >= config_.max_lost_frame)
-    {
-        if (config_.debug_mode) {
-            RCLCPP_WARN(
-                rclcpp::get_logger("BuffDetector"), "Lost target for %d consecutive frames, re-initialization required",
-                lost_frame_count_
-            );
-        }
-        return false; // 需要重新初始化
-    }
-
-    return true; // 检测成功
+    return detect_by_yolo(frame);
 }
 bool BuffDetector::detect_by_yolo(cv::Mat& frame)
 {
@@ -408,7 +278,7 @@ bool BuffDetector::detect_by_yolo(cv::Mat& frame)
     {
         if (config_.debug_mode)
         {
-            RCLCPP_WARN(
+            RCLCPP_DEBUG(
                 rclcpp::get_logger("BuffDetector"),
                 "YOLOPose init failed: %s",
                 yolo_detector.last_error().c_str()
@@ -417,6 +287,7 @@ bool BuffDetector::detect_by_yolo(cv::Mat& frame)
         return false;
     }
 
+    last_R_box_ = current_R_box_;
     target_blades_.clear();
     target_blades_.push_back(FanBlade{
         BBox(
@@ -434,11 +305,42 @@ bool BuffDetector::detect_by_yolo(cv::Mat& frame)
         static_cast<float>(output.r_box.x + output.r_box.width),
         static_cast<float>(output.r_box.y + output.r_box.height)
     );
+    buff_radius_ = euclidean_distance(current_R_box_.get_center_2f(), target_blades_.front().box.get_center_2f());
+    pose_confidence_ = output.confidence;
+    yolo_target_count_ = output.target_count;
+    current_target_keypoints_.assign(output.keypoints.begin(), output.keypoints.begin() + std::min<std::size_t>(4, output.keypoints.size()));
 
-    RCLCPP_INFO(
+    std::string mode = config_.buff_mode;
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (mode == "big" || mode == "big_buff") {
+        buff_type_ = BuffType::big_buff;
+    } else if (mode == "small" || mode == "small_buff") {
+        buff_type_ = BuffType::small_buff;
+    } else {
+        buff_type_ = output.target_count >= 2 ? BuffType::big_buff : BuffType::small_buff;
+    }
+
+    update_spin_direction_by_target_id();
+
+    if (config_.debug_mode)
+    {
+        debug_frame_ = frame.clone();
+        cv::rectangle(debug_frame_, output.fan_box, cv::Scalar(0, 255, 0), 2);
+        cv::rectangle(debug_frame_, output.r_box, cv::Scalar(255, 255, 0), 2);
+        for (const auto& point : current_target_keypoints_)
+        {
+            cv::circle(debug_frame_, point, 4, cv::Scalar(0, 0, 255), -1);
+        }
+    }
+
+    RCLCPP_DEBUG(
         rclcpp::get_logger("BuffDetector"),
-        "YOLOPose target detected: confidence=%.3f, fan=(%d,%d,%d,%d), R=(%d,%d,%d,%d)",
+        "YOLOPose target detected: confidence=%.3f, candidates=%d, mode=%s, fan=(%d,%d,%d,%d), R=(%d,%d,%d,%d)",
         output.confidence,
+        output.target_count,
+        buff_type_ == BuffType::big_buff ? "big" : "small",
         output.fan_box.x,
         output.fan_box.y,
         output.fan_box.width,

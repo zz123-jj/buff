@@ -84,6 +84,13 @@ def generate_launch_description():
                 parameters=[buff_param],
                 extra_arguments=[{'use_intra_process_comms': True}]
             ),
+            ComposableNode(
+                package='buff_debug_visualizer',
+                plugin='BuffDebugVisualizer',
+                name='buff_debug_visualizer_node',
+                parameters=[buff_param],
+                extra_arguments=[{'use_intra_process_comms': True}]
+            ),
         ],
         output='screen',
         arguments=[

@@ -33,6 +33,8 @@ class Big_Buff_Predictor {
     Big_Buff_Predictor();
     void reset();
     bool try_fit_once_at_1p5s();
+    bool fit_velocity_curve();
+    void trim_before(double min_time);
     bool is_completed() const { return fit_ready_; }
     bool has_fit_attempted() const { return fit_attempted_; }
     void set_fit_config(

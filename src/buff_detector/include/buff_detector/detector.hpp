@@ -8,16 +8,14 @@ struct BuffDetectorConfig
 {
     std::string model_path = "src/buff_detector/model/yolo11_buff_int8.xml";
     std::string openvino_device = "GPU";
-    bool use_cuda = false;
     float confidence_threshold = 0.5f;
-    float iou_threshold = 0.5f;
     bool debug_mode = true;
     float inside_shade_rate = 0.7f;
     float outside_shade_rate = 1.39f;
     cv::Scalar lower_hsv = cv::Scalar(0, 40, 220);
     cv::Scalar upper_hsv = cv::Scalar(70, 255, 255);
     int dilate_kernel_size = 7;
-    int max_lost_frame = 5;
+    std::string buff_mode = "auto";
 };
 
 float euclidean_distance(const cv::Point2f& p1, const cv::Point2f& p2); // 计算两点间的欧氏距离
@@ -115,6 +113,9 @@ private:
     std::vector<FanBlade> target_blades_;                   // 目标扇叶列表
     std::vector<FanBlade> blade_list_;                      // 所有扇叶框
     float buff_radius_ = 0.0f;                              // 能量机关半径（R标到扇叶中心的距离）
+    float pose_confidence_ = 0.0f;
+    int yolo_target_count_ = 0;
+    std::vector<cv::Point2f> current_target_keypoints_;
     int lighted_blade_num_ = 0;                             // 亮起的扇叶数量
                             // 记录亮起过的最大扇叶数量，用于判断是否结束
     int lost_frame_count_ = 0;                              // 目标丢失帧数
@@ -149,6 +150,9 @@ public:
     BBox get_current_R_box() const { return current_R_box_; }                // 获取当前R标框
     float get_radius() const { return buff_radius_; }                             // 获取能量机关半径
     int8_t get_spin_direction() const { return spin_direction_; }
+    float get_pose_confidence() const { return pose_confidence_; }
+    int get_yolo_target_count() const { return yolo_target_count_; }
+    const std::vector<cv::Point2f>& get_current_target_keypoints() const { return current_target_keypoints_; }
     cv::Mat debug_frame_; 
     cv::Mat preprocessed_frame_;      // 预处理后的二值图像
     cv::Mat roi_frame_;               // 扇叶ROI图像            // 获取调试图像

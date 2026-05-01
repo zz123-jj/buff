@@ -25,17 +25,10 @@ public:
     {
         this->declare_parameter<std::string>("model_path", "model/yolo11_buff_int8.xml");
         this->declare_parameter<std::string>("openvino_device", "GPU");
-        this->declare_parameter<bool>("use_cuda", false);
         this->declare_parameter<double>("confidence_threshold", 0.88);
-        this->declare_parameter<double>("iou_threshold", 0.5);
         this->declare_parameter<bool>("debug_mode", true);
         this->declare_parameter<bool>("image_reliable", true);
-        this->declare_parameter<double>("inside_shade_rate", 0.7);
-        this->declare_parameter<double>("outside_shade_rate", 1.39);
-        this->declare_parameter<std::vector<int64_t>>("hsv_limits.lower", {0, 40, 220});
-        this->declare_parameter<std::vector<int64_t>>("hsv_limits.upper", {70, 255, 255});
-        this->declare_parameter<int>("dilate_kernel_size", 7);
-        this->declare_parameter<int>("max_lost_frame", 30);
+        this->declare_parameter<std::string>("buff_mode", "auto");
 
 
         std::string model_path = this->get_parameter("model_path").as_string();
@@ -45,29 +38,11 @@ public:
         }
         detector_config_.model_path = model_path;
         detector_config_.openvino_device = this->get_parameter("openvino_device").as_string();
-        detector_config_.use_cuda = this->get_parameter("use_cuda").as_bool();
         detector_config_.confidence_threshold =
             static_cast<float>(this->get_parameter("confidence_threshold").as_double());
-        detector_config_.iou_threshold =
-            static_cast<float>(this->get_parameter("iou_threshold").as_double());
         detector_config_.debug_mode = this->get_parameter("debug_mode").as_bool();
         image_reliable_ = this->get_parameter("image_reliable").as_bool();
-        detector_config_.inside_shade_rate =
-            static_cast<float>(this->get_parameter("inside_shade_rate").as_double());
-        detector_config_.outside_shade_rate =
-            static_cast<float>(this->get_parameter("outside_shade_rate").as_double());
-            auto lower_vec = this->get_parameter("hsv_limits.lower").as_integer_array();
-            auto upper_vec = this->get_parameter("hsv_limits.upper").as_integer_array();    
-        detector_config_.lower_hsv = cv::Scalar(
-            lower_vec[0],
-            lower_vec[1],
-            lower_vec[2]);
-        detector_config_.upper_hsv = cv::Scalar(
-            upper_vec[0],
-            upper_vec[1],
-            upper_vec[2]);
-        detector_config_.dilate_kernel_size = this->get_parameter("dilate_kernel_size").as_int();
-        detector_config_.max_lost_frame = this->get_parameter("max_lost_frame").as_int();
+        detector_config_.buff_mode = this->get_parameter("buff_mode").as_string();
 
 
         // 初始化检测器
@@ -129,28 +104,19 @@ private:
 
     void processFrame(cv::Mat frame, const rclcpp::Time& frame_stamp)
     {
-        // 处理第一帧
-        if (!is_tracking_)
+        if (!detector_->update(frame))
         {
-            cv::Mat frame_copy = frame.clone(); // 克隆帧以供检测器使用
-            if (detector_->init(frame_copy))
-            {
-                is_tracking_ = true;
-                RCLCPP_INFO(this->get_logger(), "Detector initialized.");
-            }else{
-            RCLCPP_INFO(this->get_logger(),"Failed to initialize detector.");
+            auto target_msg = buff_interfaces::msg::BuffTarget();
+            target_msg.header.stamp = frame_stamp;
+            target_msg.header.frame_id = "camera_optical_frame";
+            target_msg.is_tracking = false;
+            set_defaultBuffTarget(target_msg);
+            target_pub_->publish(std::move(target_msg));
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 1000,
+                "YOLOPose did not find a valid buff target.");
             return;
-        }}
-
-        // 更新检测
-        if (is_tracking_)
-        {
-            if (!detector_->update(frame))
-            {
-                is_tracking_ = false;
-                RCLCPP_WARN(this->get_logger(), "Detector lost target, re-initialization required.");
-                return;
-            }
+        }
 
         // 获取中心点坐标
         cv::Point2f fan_center = detector_->get_first_target_blade_bbox().get_center_2f();
@@ -159,6 +125,7 @@ private:
         auto target_msg = buff_interfaces::msg::BuffTarget();
         target_msg.is_tracking = true;
         target_msg.header.stamp = frame_stamp;
+        target_msg.header.frame_id = "camera_optical_frame";
         target_msg.is_bigbuff = (detector_->get_buff_type() == BuffType::big_buff ? 1 : -1); // 获取当前buff模式
         target_msg.spin_direction = detector_->get_spin_direction();
         target_msg.target_center_x = fan_center.x;
@@ -166,8 +133,17 @@ private:
         target_msg.r_center_x = r_center.x;
         target_msg.r_center_y = r_center.y;
         target_msg.radius = detector_->get_radius(); // 获取能量机关半径
-        target_pub_->publish(std::move(target_msg));
+        target_msg.pose_confidence = detector_->get_pose_confidence();
+        target_msg.yolo_target_count = detector_->get_yolo_target_count();
+        const auto& keypoints = detector_->get_current_target_keypoints();
+        target_msg.has_target_keypoints = keypoints.size() >= 4;
+        target_msg.target_keypoints.fill(0.0f);
+        for (std::size_t i = 0; i < keypoints.size() && i < 4; ++i) {
+            target_msg.target_keypoints[i * 2] = keypoints[i].x;
+            target_msg.target_keypoints[i * 2 + 1] = keypoints[i].y;
         }
+        target_pub_->publish(std::move(target_msg));
+
         // 显示调试信息
         if (detector_config_.debug_mode)
         {   
@@ -217,6 +193,10 @@ private:
         msg.r_center_x = 0.0f;
         msg.r_center_y = 0.0f;
         msg.radius = 0.0f;
+        msg.has_target_keypoints = false;
+        msg.target_keypoints.fill(0.0f);
+        msg.pose_confidence = 0.0f;
+        msg.yolo_target_count = 0;
        }
   
     // ROS2 通信
@@ -233,7 +213,6 @@ private:
     image_transport::Publisher debug_image_pub_;
     image_transport::Publisher preprocessed_image_pub_;
     image_transport::Publisher roi_image_pub_;
-    bool is_tracking_ = false;
     cv::Mat video_frame_;
 };
 

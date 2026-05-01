@@ -4,6 +4,7 @@
 #include <eigen3/Eigen/Dense>
 #include <stdexcept>
 #include <cmath>
+#include <algorithm>
 
 
 //循环队列：用于存储固定大小的数据窗
@@ -47,4 +48,3 @@ public:
     MedianFilter(int window_size = 5);
     float update(float data);
 };
-

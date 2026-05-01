@@ -26,7 +26,6 @@ public:
         this->declare_parameter<std::string>("frames.target", "odom");
         this->declare_parameter<double>("ballistic.bullet_speed", 23.8);
         this->declare_parameter<double>("ballistic.shoot_delay", 0.05);
-        this->declare_parameter<double>("physical_radius", 0.75);
         this->declare_parameter<double>("ballistic.gravity", 9.81);
         this->declare_parameter<double>("ballistic.air_k", 0.001);
         this->declare_parameter<double>("ballistic.converge_thresh", 0.002);
@@ -38,7 +37,6 @@ public:
         target_frame_    = this->get_parameter("frames.target").as_string();
         bullet_speed_    = this->get_parameter("ballistic.bullet_speed").as_double();
         shoot_delay_     = this->get_parameter("ballistic.shoot_delay").as_double();
-        physical_radius_ = this->get_parameter("physical_radius").as_double();
         gravity_         = this->get_parameter("ballistic.gravity").as_double();
         air_k_           = this->get_parameter("ballistic.air_k").as_double();
         converge_thresh_ = this->get_parameter("ballistic.converge_thresh").as_double();
@@ -48,7 +46,7 @@ public:
         stop_error_      = this->get_parameter("stop_error").as_double();
 
         RCLCPP_INFO(this->get_logger(),
-            "BuffAimer started. bullet=%.2f m/s, radius=%.2f m", bullet_speed_, physical_radius_);
+            "BuffAimer started. bullet=%.2f m/s", bullet_speed_);
 
         // ---------- 订阅与发布 ----------
         aiming_sub_ = this->create_subscription<buff_interfaces::msg::BuffAimingData>(
@@ -67,6 +65,16 @@ public:
     }
 
 private:
+    static Eigen::Vector3d rotateRodrigues(
+        const Eigen::Vector3d& vector,
+        const Eigen::Vector3d& axis,
+        double angle) {
+        const Eigen::Vector3d k = axis.normalized();
+        return vector * std::cos(angle)
+             + k.cross(vector) * std::sin(angle)
+             + k * k.dot(vector) * (1.0 - std::cos(angle));
+    }
+
     void aimingCallback(const buff_interfaces::msg::BuffAimingData::SharedPtr msg) {
         if (!msg->is_tracking) {
             return;
@@ -170,13 +178,13 @@ private:
         } else {
             delta_theta = 0.0;
         }
-             // 1. 构建 R 标中心点的 3D 向量
+            // 1. World circle center from the estimator.
             Eigen::Vector3d r_center(msg.r_x_3d, msg.r_y_3d, msg.r_z_3d);
 
-            // 2. 构建当前目标的 3D 向量
+            // 2. Current observed hit point in the world frame.
             Eigen::Vector3d current_target(msg.target_x_3d, msg.target_y_3d, msg.target_z_3d);
 
-            // 3. 计算旋转轴（法向量）：target_frame下的“相机光心 -> R标”单位向量
+            // 3. World circle normal fitted by PCA/SVD.
             Eigen::Vector3d normal_axis(msg.axis_x_3d, msg.axis_y_3d, msg.axis_z_3d);
             if (normal_axis.norm() <= eps) {
                 normal_axis = r_center;
@@ -190,17 +198,14 @@ private:
             }
             normal_axis.normalize();
 
-            // 4. 构建“半径向量”（从 R 标指向当前目标的向量）
+            // 4. Radius vector from fitted circle center to current hit point.
             Eigen::Vector3d radius_vector = current_target - r_center;
 
-            // 5. 构造 3D 旋转器 (基于右手螺旋定则)
-            // delta_theta 已按 spin_direction 带符号，旋转方向遵循右手定则。
-            Eigen::AngleAxisd rotation(delta_theta, normal_axis);
+            // 5. Rodrigues rotation in the world frame.
+            Eigen::Vector3d pred_radius_vector =
+                rotateRodrigues(radius_vector, normal_axis, delta_theta);
 
-            // 6. 对半径向量进行 3D 旋转
-            Eigen::Vector3d pred_radius_vector = rotation * radius_vector;
-
-            // 7. 计算最终的 3D 预测坐标 = R心坐标 + 旋转后的半径向量
+            // 6. Predicted world hit point.
             Eigen::Vector3d pred_target = r_center + pred_radius_vector;
 
             geometry_msgs::msg::Point p;
@@ -266,7 +271,7 @@ private:
     rclcpp::Publisher<gary_msgs::msg::AutoAimDebug>::SharedPtr debug_pub_;
 
     std::string target_frame_;
-    double bullet_speed_, shoot_delay_, physical_radius_;
+    double bullet_speed_, shoot_delay_;
     double gravity_, air_k_, converge_thresh_, sim_dt_, stop_error_;
     int max_iteration_;
     bool debug_;
