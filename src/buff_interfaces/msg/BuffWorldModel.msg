@@ -5,8 +5,10 @@ bool valid
 int8 mode                    # 0=unknown, -1=small buff, 1=big buff
 int8 spin_direction          # 0=unknown, -1=negative angle, 1=positive angle
 
-geometry_msgs/Point observed_point_world
-geometry_msgs/Point fitted_point_world
+bool has_observation             # true only when this message was corrected by a YOLO observation
+float32 seconds_since_observation
+geometry_msgs/Point observed_point_world # last/current YOLO observation in world frame
+geometry_msgs/Point fitted_point_world   # model point on the circle at header.stamp
 geometry_msgs/Point observed_point_camera
 float32 depth
 

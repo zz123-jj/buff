@@ -35,6 +35,7 @@ buff_estimator_node:
     min_fit_angle_span_rad: 0.75
     pnp_normal_weight: 0.85
     known_circle_radius_m: 0.70
+    model_publish_rate_hz: 60.0
     use_plane_constrained_points: true
     plane_normal_alpha: 0.08
     plane_offset_alpha: 0.05

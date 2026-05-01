@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <memory>
@@ -28,6 +29,7 @@
 namespace
 {
 constexpr double kBladeInterval = 2.0 * M_PI / 5.0;
+constexpr double kSmallBuffAngularSpeed = M_PI / 3.0;
 
 Eigen::Quaterniond transformRotationToEigen(const geometry_msgs::msg::TransformStamped& transform)
 {
@@ -124,6 +126,13 @@ public:
         world_model_pub_ = this->create_publisher<buff_interfaces::msg::BuffWorldModel>(
             "/buff/world_model", rclcpp::SensorDataQoS());
 
+        if (model_publish_rate_hz_ > 0.0) {
+            const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::duration<double>(1.0 / model_publish_rate_hz_));
+            model_publish_timer_ = this->create_wall_timer(
+                period, [this]() { publishPredictedWorldModel(this->now(), 0, false); });
+        }
+
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
@@ -179,6 +188,7 @@ private:
         this->declare_parameter<double>("min_fit_angle_span_rad", 0.75);
         this->declare_parameter<double>("pnp_normal_weight", 0.85);
         this->declare_parameter<double>("known_circle_radius_m", 0.75);
+        this->declare_parameter<double>("model_publish_rate_hz", 60.0);
         this->declare_parameter<bool>("use_plane_constrained_points", true);
         this->declare_parameter<double>("plane_normal_alpha", 0.08);
         this->declare_parameter<double>("plane_offset_alpha", 0.05);
@@ -223,6 +233,7 @@ private:
         min_fit_angle_span_rad_ = this->get_parameter("min_fit_angle_span_rad").as_double();
         pnp_normal_weight_ = this->get_parameter("pnp_normal_weight").as_double();
         known_circle_radius_m_ = this->get_parameter("known_circle_radius_m").as_double();
+        model_publish_rate_hz_ = this->get_parameter("model_publish_rate_hz").as_double();
         use_plane_constrained_points_ =
             this->get_parameter("use_plane_constrained_points").as_bool();
         plane_normal_alpha_ = this->get_parameter("plane_normal_alpha").as_double();
@@ -663,16 +674,166 @@ private:
         return true;
     }
 
-    void targetCallback(const buff_interfaces::msg::BuffTarget::SharedPtr msg)
+    double integrateAbsAngularSpeed(double from_time, double to_time) const
+    {
+        const double dt = std::max(0.0, to_time - from_time);
+        if (dt <= 0.0) {
+            return 0.0;
+        }
+
+        if (last_mode_ == 1) {
+            if (predictor_->is_completed()) {
+                const Eigen::Vector4f params = predictor_->get_velocity_fit_params();
+                const double a = params[0];
+                const double omega = params[1];
+                const double phi = params[2];
+                const double b = params[3];
+                if (std::abs(a) > 1e-6 && std::abs(omega) > 1e-6) {
+                    const double t0 = from_time - fit_start_time_;
+                    const double t1 = to_time - fit_start_time_;
+                    return b * dt - (a / omega) *
+                        (std::cos(omega * t1 + phi) - std::cos(omega * t0 + phi));
+                }
+            }
+            return std::abs(last_velocity_) * dt;
+        }
+
+        if (last_mode_ == -1) {
+            return kSmallBuffAngularSpeed * dt;
+        }
+
+        return 0.0;
+    }
+
+    double predictedAngleAt(double stamp_sec) const
+    {
+        if (!has_last_angle_) {
+            return 0.0;
+        }
+
+        int8_t direction = world_spin_direction_;
+        if (direction == 0 && std::abs(last_velocity_) > 1e-3) {
+            direction = last_velocity_ > 0.0 ? 1 : -1;
+        }
+        if (direction == 0) {
+            return last_theta_;
+        }
+
+        return last_theta_ +
+            static_cast<double>(direction) * integrateAbsAngularSpeed(last_angle_time_, stamp_sec);
+    }
+
+    void rememberObservation(
+        double now,
+        const Eigen::Vector3d& p_world,
+        const Eigen::Vector3d& p_camera,
+        double confidence,
+        int yolo_target_count)
+    {
+        has_last_yolo_observation_ = true;
+        last_yolo_observation_time_ = now;
+        last_observed_world_point_ = p_world;
+        last_observed_camera_point_ = p_camera;
+        last_observation_confidence_ = confidence;
+        last_yolo_target_count_ = yolo_target_count;
+        last_observed_depth_ = p_camera.z();
+    }
+
+    buff_interfaces::msg::BuffWorldModel makeWorldModelMessage(
+        const rclcpp::Time& stamp,
+        int8_t mode_hint,
+        bool has_observation,
+        const Eigen::Vector3d& observed_world,
+        const Eigen::Vector3d& observed_camera,
+        double confidence,
+        int yolo_target_count)
     {
         buff_interfaces::msg::BuffWorldModel model_msg;
-        model_msg.header = msg->header;
+        model_msg.header.stamp = stamp;
         model_msg.header.frame_id = target_frame_;
-        model_msg.mode = msg->is_bigbuff;
+        model_msg.mode = mode_hint != 0 ? mode_hint : last_mode_;
+        model_msg.valid = circle_model_.valid && has_last_angle_;
+        model_msg.spin_direction = world_spin_direction_;
+        model_msg.has_observation = has_observation;
+
+        const double stamp_sec = stamp.seconds();
+        const double observation_age =
+            has_last_yolo_observation_ ? std::max(0.0, stamp_sec - last_yolo_observation_time_) : 0.0;
+        model_msg.seconds_since_observation = static_cast<float>(observation_age);
+
+        const Eigen::Vector3d observation_world =
+            has_observation || !has_last_yolo_observation_
+                ? observed_world
+                : last_observed_world_point_;
+        const Eigen::Vector3d observation_camera =
+            has_observation || !has_last_yolo_observation_
+                ? observed_camera
+                : last_observed_camera_point_;
+
+        const double predicted_angle = model_msg.valid
+            ? predictedAngleAt(stamp_sec)
+            : (has_last_angle_ ? last_theta_ : 0.0);
+        const Eigen::Vector3d fitted_world = model_msg.valid
+            ? pointOnCircleAtAngle(circle_model_, predicted_angle)
+            : projectPointToCircle(circle_model_, observation_world);
+
+        model_msg.observed_point_world = toPointMsg(observation_world);
+        model_msg.fitted_point_world = toPointMsg(fitted_world);
+        model_msg.observed_point_camera = toPointMsg(observation_camera);
+        model_msg.depth = static_cast<float>(
+            has_observation || !has_last_yolo_observation_
+                ? observed_camera.z()
+                : last_observed_depth_);
+
+        if (circle_model_.valid) {
+            model_msg.circle_center_world = toPointMsg(circle_model_.center);
+            model_msg.circle_axis_world = toVector3Msg(circle_model_.normal);
+            model_msg.circle_radius = static_cast<float>(circle_model_.radius);
+            model_msg.plane_rms = static_cast<float>(circle_model_.plane_rms);
+            model_msg.circle_rms = static_cast<float>(circle_model_.circle_rms);
+            model_msg.angle_span = static_cast<float>(circle_model_.angle_span);
+        }
+
+        model_msg.current_angle = static_cast<float>(predicted_angle);
+        model_msg.angular_velocity = static_cast<float>(last_velocity_);
+        model_msg.observation_confidence = static_cast<float>(
+            has_observation ? confidence : last_observation_confidence_);
+        model_msg.yolo_target_count =
+            has_observation ? yolo_target_count : last_yolo_target_count_;
+        fillVelocityFields(model_msg, model_msg.mode);
+        return model_msg;
+    }
+
+    void publishPredictedWorldModel(
+        const rclcpp::Time& stamp,
+        int8_t mode_hint,
+        bool publish_invalid_if_unready)
+    {
+        if (!circle_model_.valid || !has_last_angle_) {
+            if (!publish_invalid_if_unready) {
+                return;
+            }
+            auto model_msg = makeWorldModelMessage(
+                stamp, mode_hint, false,
+                Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), 0.0, 0);
+            model_msg.valid = false;
+            world_model_pub_->publish(model_msg);
+            return;
+        }
+
+        const auto model_msg = makeWorldModelMessage(
+            stamp, mode_hint, false,
+            last_observed_world_point_, last_observed_camera_point_,
+            last_observation_confidence_, last_yolo_target_count_);
+        world_model_pub_->publish(model_msg);
+    }
+
+    void targetCallback(const buff_interfaces::msg::BuffTarget::SharedPtr msg)
+    {
+        const rclcpp::Time stamp(msg->header.stamp);
 
         if (!msg->is_tracking || !msg->has_target_keypoints || !has_cam_info_) {
-            setDefaultWorldModel(model_msg, msg->is_bigbuff);
-            world_model_pub_->publish(model_msg);
+            publishPredictedWorldModel(stamp, msg->is_bigbuff, true);
             return;
         }
 
@@ -680,43 +841,34 @@ private:
             resetMotionState();
             last_mode_ = msg->is_bigbuff;
         }
+        if (world_spin_direction_ == 0 && msg->spin_direction != 0) {
+            world_spin_direction_ = msg->spin_direction;
+        }
 
         Eigen::Vector3d p_camera;
         Eigen::Vector3d normal_camera;
         double reprojection_error = 0.0;
         if (!solvePnpHitPoint(*msg, p_camera, normal_camera, reprojection_error)) {
-            setDefaultWorldModel(model_msg, msg->is_bigbuff);
-            world_model_pub_->publish(model_msg);
+            publishPredictedWorldModel(stamp, msg->is_bigbuff, true);
             return;
         }
         if (reprojection_error > max_reprojection_error_px_) {
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
                 "Reject PnP observation: reprojection_error=%.2f px", reprojection_error);
-            setDefaultWorldModel(model_msg, msg->is_bigbuff);
-            model_msg.observed_point_camera = toPointMsg(p_camera);
-            model_msg.depth = static_cast<float>(p_camera.z());
-            world_model_pub_->publish(model_msg);
+            publishPredictedWorldModel(stamp, msg->is_bigbuff, true);
             return;
         }
 
         Eigen::Vector3d p_world;
         if (!cameraToWorld(p_camera, msg->header.stamp, p_world)) {
-            setDefaultWorldModel(model_msg, msg->is_bigbuff);
-            model_msg.observed_point_camera = toPointMsg(p_camera);
-            model_msg.depth = static_cast<float>(p_camera.z());
-            world_model_pub_->publish(model_msg);
+            publishPredictedWorldModel(stamp, msg->is_bigbuff, true);
             return;
         }
 
         Eigen::Vector3d normal_world;
         if (!cameraNormalToWorld(normal_camera, msg->header.stamp, normal_world)) {
-            setDefaultWorldModel(model_msg, msg->is_bigbuff);
-            model_msg.observed_point_world = toPointMsg(p_world);
-            model_msg.fitted_point_world = toPointMsg(p_world);
-            model_msg.observed_point_camera = toPointMsg(p_camera);
-            model_msg.depth = static_cast<float>(p_camera.z());
-            world_model_pub_->publish(model_msg);
+            publishPredictedWorldModel(stamp, msg->is_bigbuff, true);
             return;
         }
 
@@ -732,14 +884,7 @@ private:
                 now, false, plane_constrained ? "discontinuous_plane" : "discontinuous_raw",
                 raw_p_world, p_world, normal_world, p_camera, reprojection_error,
                 msg->pose_confidence, msg->yolo_target_count);
-            setDefaultWorldModel(model_msg, msg->is_bigbuff);
-            model_msg.observed_point_world = toPointMsg(p_world);
-            model_msg.fitted_point_world = toPointMsg(projectPointToCircle(circle_model_, p_world));
-            model_msg.observed_point_camera = toPointMsg(p_camera);
-            model_msg.depth = static_cast<float>(p_camera.z());
-            model_msg.observation_confidence = msg->pose_confidence;
-            model_msg.yolo_target_count = msg->yolo_target_count;
-            world_model_pub_->publish(model_msg);
+            publishPredictedWorldModel(stamp, msg->is_bigbuff, true);
             return;
         }
 
@@ -760,38 +905,20 @@ private:
                 this->get_logger(), *this->get_clock(), 1000,
                 "Skip outlier point for circle model, residual=%.3f",
                 buff_estimator::WorldCircleFitter::radialResidual(circle_model_, p_world));
+            publishPredictedWorldModel(stamp, msg->is_bigbuff, true);
+            return;
         }
 
         tryUpdateCircleModel(now);
         const bool has_angle = updateAngularState(now, p_world, msg->is_bigbuff);
-
-        const Eigen::Vector3d fitted_p_world = circle_model_.valid && has_angle
-            ? pointOnCircleAtAngle(circle_model_, last_theta_)
-            : projectPointToCircle(circle_model_, p_world);
-
-        model_msg.valid = circle_model_.valid && has_angle;
-        model_msg.spin_direction = world_spin_direction_ != 0 ? world_spin_direction_ : msg->spin_direction;
-        model_msg.observed_point_world = toPointMsg(p_world);
-        model_msg.fitted_point_world = toPointMsg(fitted_p_world);
-        model_msg.observed_point_camera = toPointMsg(p_camera);
-        model_msg.depth = static_cast<float>(p_camera.z());
-        model_msg.circle_radius = circle_model_.valid
-            ? static_cast<float>(circle_model_.radius)
-            : 0.0f;
-        model_msg.current_angle = has_angle ? static_cast<float>(last_theta_) : 0.0f;
-        model_msg.angular_velocity = static_cast<float>(last_velocity_);
-        model_msg.observation_confidence = msg->pose_confidence;
-        model_msg.yolo_target_count = msg->yolo_target_count;
-
-        if (circle_model_.valid) {
-            model_msg.circle_center_world = toPointMsg(circle_model_.center);
-            model_msg.circle_axis_world = toVector3Msg(circle_model_.normal);
-            model_msg.plane_rms = static_cast<float>(circle_model_.plane_rms);
-            model_msg.circle_rms = static_cast<float>(circle_model_.circle_rms);
-            model_msg.angle_span = static_cast<float>(circle_model_.angle_span);
+        if (has_angle) {
+            rememberObservation(
+                now, p_world, p_camera, msg->pose_confidence, msg->yolo_target_count);
         }
 
-        fillVelocityFields(model_msg, msg->is_bigbuff);
+        auto model_msg = makeWorldModelMessage(
+            stamp, msg->is_bigbuff, true,
+            p_world, p_camera, msg->pose_confidence, msg->yolo_target_count);
         writeDebugRow(now, p_world, model_msg);
 
         world_model_pub_->publish(model_msg);
@@ -814,40 +941,12 @@ private:
             model_msg.speed_a = 0.0f;
             model_msg.speed_omega = 0.0f;
             model_msg.speed_phi = 0.0f;
-            model_msg.speed_b = 0.0f;
+            model_msg.speed_b = mode == -1 ? static_cast<float>(kSmallBuffAngularSpeed) : 0.0f;
         }
 
         model_msg.speed_fit_start_time_sec = fit_start_time_;
         model_msg.speed_fit_buffer_duration_sec = predictor_->get_fit_buffer_duration_sec();
         model_msg.speed_fit_sample_count = predictor_->get_fit_data_point_count();
-    }
-
-    void setDefaultWorldModel(buff_interfaces::msg::BuffWorldModel& model_msg, int8_t mode)
-    {
-        model_msg.valid = false;
-        model_msg.mode = mode;
-        model_msg.spin_direction = world_spin_direction_;
-        model_msg.observed_point_world = geometry_msgs::msg::Point();
-        model_msg.fitted_point_world = geometry_msgs::msg::Point();
-        model_msg.observed_point_camera = geometry_msgs::msg::Point();
-        model_msg.depth = 0.0f;
-        model_msg.circle_center_world = circle_model_.valid
-            ? toPointMsg(circle_model_.center)
-            : geometry_msgs::msg::Point();
-        model_msg.circle_axis_world = circle_model_.valid
-            ? toVector3Msg(circle_model_.normal)
-            : geometry_msgs::msg::Vector3();
-        model_msg.circle_radius = circle_model_.valid
-            ? static_cast<float>(circle_model_.radius)
-            : 0.0f;
-        model_msg.current_angle = has_last_angle_ ? static_cast<float>(last_theta_) : 0.0f;
-        model_msg.angular_velocity = static_cast<float>(last_velocity_);
-        model_msg.plane_rms = circle_model_.valid ? static_cast<float>(circle_model_.plane_rms) : 0.0f;
-        model_msg.circle_rms = circle_model_.valid ? static_cast<float>(circle_model_.circle_rms) : 0.0f;
-        model_msg.angle_span = circle_model_.valid ? static_cast<float>(circle_model_.angle_span) : 0.0f;
-        model_msg.observation_confidence = 0.0f;
-        model_msg.yolo_target_count = 0;
-        fillVelocityFields(model_msg, mode);
     }
 
     void resetMotionState()
@@ -864,8 +963,15 @@ private:
         world_spin_direction_ = 0;
         last_blade_jump_ = false;
         has_last_accepted_observation_ = false;
+        has_last_yolo_observation_ = false;
         last_accepted_observation_time_ = 0.0;
+        last_yolo_observation_time_ = 0.0;
         last_accepted_world_point_ = Eigen::Vector3d::Zero();
+        last_observed_world_point_ = Eigen::Vector3d::Zero();
+        last_observed_camera_point_ = Eigen::Vector3d::Zero();
+        last_observation_confidence_ = 0.0;
+        last_yolo_target_count_ = 0;
+        last_observed_depth_ = 0.0;
         has_observation_plane_ = false;
         observation_plane_normal_ = Eigen::Vector3d::UnitZ();
         observation_plane_offset_ = 0.0;
@@ -939,6 +1045,7 @@ private:
     rclcpp::Subscription<buff_interfaces::msg::BuffTarget>::SharedPtr target_sub_;
     rclcpp::Publisher<buff_interfaces::msg::BuffWorldModel>::SharedPtr world_model_pub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_sub_;
+    rclcpp::TimerBase::SharedPtr model_publish_timer_;
 
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -980,6 +1087,7 @@ private:
     double min_fit_angle_span_rad_ = 0.75;
     double pnp_normal_weight_ = 0.85;
     double known_circle_radius_m_ = 0.75;
+    double model_publish_rate_hz_ = 60.0;
     bool use_plane_constrained_points_ = true;
     double plane_normal_alpha_ = 0.08;
     double plane_offset_alpha_ = 0.05;
@@ -1002,15 +1110,22 @@ private:
     bool has_last_angle_ = false;
     bool has_fit_start_time_ = false;
     bool has_last_accepted_observation_ = false;
+    bool has_last_yolo_observation_ = false;
     bool has_observation_plane_ = false;
     bool last_blade_jump_ = false;
     Eigen::Vector3d last_accepted_world_point_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d last_observed_world_point_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d last_observed_camera_point_ = Eigen::Vector3d::Zero();
     Eigen::Vector3d observation_plane_normal_ = Eigen::Vector3d::UnitZ();
+    double last_observation_confidence_ = 0.0;
+    int last_yolo_target_count_ = 0;
+    double last_observed_depth_ = 0.0;
     double fit_start_time_ = 0.0;
     double last_theta_ = 0.0;
     double last_angle_time_ = 0.0;
     double last_velocity_ = 0.0;
     double last_accepted_observation_time_ = 0.0;
+    double last_yolo_observation_time_ = 0.0;
     double observation_plane_offset_ = 0.0;
 };
 

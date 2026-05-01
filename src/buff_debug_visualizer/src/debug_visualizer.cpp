@@ -369,7 +369,7 @@ private:
                 cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255, 0, 255), 2);
         }
 
-        if (visible[2]) {
+        if (world_model.has_observation && visible[2]) {
             cv::circle(image, pixels[2], 8, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
             cv::putText(
                 image, "obs", pixels[2] + cv::Point2f(8.0f, 16.0f),
@@ -400,7 +400,8 @@ private:
         const std::string mode = world_model.mode == 1 ? "BIG" : "SMALL";
         const std::string text = "world circle " + mode +
             " r=" + std::to_string(radius).substr(0, 5) +
-            " angle=" + std::to_string(world_model.current_angle).substr(0, 6);
+            " angle=" + std::to_string(world_model.current_angle).substr(0, 6) +
+            " obs_age=" + std::to_string(world_model.seconds_since_observation).substr(0, 4);
         cv::putText(
             image, text, cv::Point(20, 36),
             cv::FONT_HERSHEY_SIMPLEX, 0.75, cv::Scalar(255, 255, 255), 2);
