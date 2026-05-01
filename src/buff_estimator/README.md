@@ -1,6 +1,6 @@
 # buff_estimator
 
-`buff_estimator` 接收 `buff_detector` 的 2D 观测，结合相机内参和 TF，把目标估计到 3D 空间，并输出给自瞄节点使用的 `/buff/aiming_data`。
+`buff_estimator` 接收 `buff_detector` 的 2D 观测，结合相机内参和 TF，把目标估计到 3D 空间，并输出世界圆运动模型 `/buff/world_model`。
 
 它同时负责大符速度曲线拟合，所以内部仍保留 `Big_Buff_Predictor` 这类预测/拟合实现；包名改为 estimator 是为了更准确表达节点的接口职责。
 
@@ -12,4 +12,4 @@
 
 输出：
 
-- `/buff/aiming_data`
+- `/buff/world_model`

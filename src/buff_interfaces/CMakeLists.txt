@@ -28,8 +28,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 
   "msg/BuffTarget.msg"
 
-  "msg/BuffAimingData.msg"
-
   "msg/BuffWorldModel.msg"
 
   DEPENDENCIES std_msgs geometry_msgs

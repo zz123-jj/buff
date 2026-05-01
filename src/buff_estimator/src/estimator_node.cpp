@@ -797,58 +797,57 @@ private:
         world_model_pub_->publish(model_msg);
     }
 
-    void fillVelocityFields(buff_interfaces::msg::BuffAimingData& aiming_msg, int8_t mode)
+    void fillVelocityFields(buff_interfaces::msg::BuffWorldModel& model_msg, int8_t mode)
     {
         if (mode == 1 && predictor_->is_completed()) {
             const Eigen::Vector4f params = predictor_->get_velocity_fit_params();
-            aiming_msg.sin_a = params[0];
-            aiming_msg.sin_omega = params[1];
-            aiming_msg.sin_phi = params[2];
-            aiming_msg.sin_b = params[3];
+            model_msg.speed_a = params[0];
+            model_msg.speed_omega = params[1];
+            model_msg.speed_phi = params[2];
+            model_msg.speed_b = params[3];
         } else if (mode == 1) {
-            aiming_msg.sin_a = 0.0f;
-            aiming_msg.sin_omega = 0.0f;
-            aiming_msg.sin_phi = 0.0f;
-            aiming_msg.sin_b = static_cast<float>(std::abs(last_velocity_));
+            model_msg.speed_a = 0.0f;
+            model_msg.speed_omega = 0.0f;
+            model_msg.speed_phi = 0.0f;
+            model_msg.speed_b = static_cast<float>(std::abs(last_velocity_));
         } else {
-            aiming_msg.sin_a = 0.0f;
-            aiming_msg.sin_omega = 0.0f;
-            aiming_msg.sin_phi = 0.0f;
-            aiming_msg.sin_b = 0.0f;
+            model_msg.speed_a = 0.0f;
+            model_msg.speed_omega = 0.0f;
+            model_msg.speed_phi = 0.0f;
+            model_msg.speed_b = 0.0f;
         }
 
-        aiming_msg.fit_start_time_sec = fit_start_time_;
-        aiming_msg.fit_buffer_duration_sec = predictor_->get_fit_buffer_duration_sec();
-        aiming_msg.fit_data_point_count = predictor_->get_fit_data_point_count();
+        model_msg.speed_fit_start_time_sec = fit_start_time_;
+        model_msg.speed_fit_buffer_duration_sec = predictor_->get_fit_buffer_duration_sec();
+        model_msg.speed_fit_sample_count = predictor_->get_fit_data_point_count();
     }
 
-    void setDefaultAimingMsg(buff_interfaces::msg::BuffAimingData& aiming_msg, int8_t mode)
+    void setDefaultWorldModel(buff_interfaces::msg::BuffWorldModel& model_msg, int8_t mode)
     {
-        aiming_msg.is_tracking = false;
-        aiming_msg.is_bigbuff = mode;
-        aiming_msg.spin_direction = world_spin_direction_;
-        aiming_msg.r_x_3d = 0.0f;
-        aiming_msg.r_y_3d = 0.0f;
-        aiming_msg.r_z_3d = 0.0f;
-        aiming_msg.r_cam_x_3d = 0.0f;
-        aiming_msg.r_cam_y_3d = 0.0f;
-        aiming_msg.r_cam_z_3d = 0.0f;
-        aiming_msg.axis_x_3d = 0.0f;
-        aiming_msg.axis_y_3d = 0.0f;
-        aiming_msg.axis_z_3d = 0.0f;
-        aiming_msg.depth = 0.0f;
-        aiming_msg.target_x_3d = 0.0f;
-        aiming_msg.target_y_3d = 0.0f;
-        aiming_msg.target_z_3d = 0.0f;
-        aiming_msg.sin_a = 0.0f;
-        aiming_msg.sin_omega = 0.0f;
-        aiming_msg.sin_phi = 0.0f;
-        aiming_msg.sin_b = static_cast<float>(std::abs(last_velocity_));
-        aiming_msg.fit_start_time_sec = fit_start_time_;
-        aiming_msg.fit_buffer_duration_sec = predictor_->get_fit_buffer_duration_sec();
-        aiming_msg.fit_data_point_count = predictor_->get_fit_data_point_count();
-        aiming_msg.filter_radius = circle_model_.valid ? static_cast<float>(circle_model_.radius) : 0.0f;
-        aiming_msg.angle = has_last_angle_ ? static_cast<float>(last_theta_) : 0.0f;
+        model_msg.valid = false;
+        model_msg.mode = mode;
+        model_msg.spin_direction = world_spin_direction_;
+        model_msg.observed_point_world = geometry_msgs::msg::Point();
+        model_msg.fitted_point_world = geometry_msgs::msg::Point();
+        model_msg.observed_point_camera = geometry_msgs::msg::Point();
+        model_msg.depth = 0.0f;
+        model_msg.circle_center_world = circle_model_.valid
+            ? toPointMsg(circle_model_.center)
+            : geometry_msgs::msg::Point();
+        model_msg.circle_axis_world = circle_model_.valid
+            ? toVector3Msg(circle_model_.normal)
+            : geometry_msgs::msg::Vector3();
+        model_msg.circle_radius = circle_model_.valid
+            ? static_cast<float>(circle_model_.radius)
+            : 0.0f;
+        model_msg.current_angle = has_last_angle_ ? static_cast<float>(last_theta_) : 0.0f;
+        model_msg.angular_velocity = static_cast<float>(last_velocity_);
+        model_msg.plane_rms = circle_model_.valid ? static_cast<float>(circle_model_.plane_rms) : 0.0f;
+        model_msg.circle_rms = circle_model_.valid ? static_cast<float>(circle_model_.circle_rms) : 0.0f;
+        model_msg.angle_span = circle_model_.valid ? static_cast<float>(circle_model_.angle_span) : 0.0f;
+        model_msg.observation_confidence = 0.0f;
+        model_msg.yolo_target_count = 0;
+        fillVelocityFields(model_msg, mode);
     }
 
     void resetMotionState()
@@ -875,7 +874,7 @@ private:
     void writeDebugRow(
         double now,
         const Eigen::Vector3d& p_world,
-        const buff_interfaces::msg::BuffAimingData& aiming_msg)
+        const buff_interfaces::msg::BuffWorldModel& model_msg)
     {
         if (!debug_csv_.is_open()) {
             return;
@@ -896,7 +895,7 @@ private:
                    << circle_model_.plane_rms << ','
                    << circle_model_.circle_rms << ','
                    << circle_model_.angle_span << ','
-                   << aiming_msg.angle << ','
+                   << model_msg.current_angle << ','
                    << last_velocity_ << '\n';
     }
 
@@ -938,7 +937,7 @@ private:
     }
 
     rclcpp::Subscription<buff_interfaces::msg::BuffTarget>::SharedPtr target_sub_;
-    rclcpp::Publisher<buff_interfaces::msg::BuffAimingData>::SharedPtr aiming_pub_;
+    rclcpp::Publisher<buff_interfaces::msg::BuffWorldModel>::SharedPtr world_model_pub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_sub_;
 
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;

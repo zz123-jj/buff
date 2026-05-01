@@ -27,7 +27,7 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
-#include "buff_interfaces/msg/buff_aiming_data.hpp"
+#include "buff_interfaces/msg/buff_world_model.hpp"
 
 namespace
 {
@@ -68,7 +68,7 @@ public:
     {
         declare_parameter<std::string>("topics.image", "/image_raw");
         declare_parameter<std::string>("topics.camera_info", "/camera_info");
-        declare_parameter<std::string>("topics.aiming_data", "/buff/aiming_data");
+        declare_parameter<std::string>("topics.world_model", "/buff/world_model");
         declare_parameter<std::string>(
             "topics.output_compressed_image",
             "/buff/world_model_debug_image/compressed");
@@ -83,7 +83,7 @@ public:
 
         image_topic_ = get_parameter("topics.image").as_string();
         camera_info_topic_ = get_parameter("topics.camera_info").as_string();
-        aiming_topic_ = get_parameter("topics.aiming_data").as_string();
+        world_model_topic_ = get_parameter("topics.world_model").as_string();
         output_topic_ = get_parameter("topics.output_compressed_image").as_string();
         camera_frame_ = get_parameter("frames.camera").as_string();
         enabled_ = get_parameter("enabled").as_bool();
@@ -108,11 +108,11 @@ public:
             camera_info_topic_, rclcpp::SensorDataQoS(),
             [this](const sensor_msgs::msg::CameraInfo::SharedPtr msg) { cameraInfoCallback(msg); });
 
-        aiming_sub_ = create_subscription<buff_interfaces::msg::BuffAimingData>(
-            aiming_topic_, rclcpp::SensorDataQoS(),
-            [this](const buff_interfaces::msg::BuffAimingData::SharedPtr msg) {
-                std::lock_guard<std::mutex> lock(aiming_mutex_);
-                latest_aiming_ = msg;
+        world_model_sub_ = create_subscription<buff_interfaces::msg::BuffWorldModel>(
+            world_model_topic_, rclcpp::SensorDataQoS(),
+            [this](const buff_interfaces::msg::BuffWorldModel::SharedPtr msg) {
+                std::lock_guard<std::mutex> lock(world_model_mutex_);
+                latest_world_model_ = msg;
             });
 
         image_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>(
@@ -166,17 +166,17 @@ private:
             return;
         }
 
-        buff_interfaces::msg::BuffAimingData::SharedPtr aiming;
+        buff_interfaces::msg::BuffWorldModel::SharedPtr world_model;
         {
-            std::lock_guard<std::mutex> lock(aiming_mutex_);
-            aiming = latest_aiming_;
+            std::lock_guard<std::mutex> lock(world_model_mutex_);
+            world_model = latest_world_model_;
         }
 
-        if (aiming && aiming->is_tracking) {
+        if (world_model && world_model->valid) {
             const double age = std::abs((rclcpp::Time(msg->header.stamp) -
-                                         rclcpp::Time(aiming->header.stamp)).seconds());
+                                         rclcpp::Time(world_model->header.stamp)).seconds());
             if (stale_timeout_sec_ <= 0.0 || age <= stale_timeout_sec_) {
-                drawWorldModel(image, *aiming, msg->header.stamp);
+                drawWorldModel(image, *world_model, msg->header.stamp);
             } else {
                 cv::putText(
                     image, "buff model stale", cv::Point(20, 36),
@@ -267,24 +267,29 @@ private:
 
     void drawWorldModel(
         cv::Mat& image,
-        const buff_interfaces::msg::BuffAimingData& aiming,
+        const buff_interfaces::msg::BuffWorldModel& world_model,
         const builtin_interfaces::msg::Time& image_stamp)
     {
         const Eigen::Vector3d center(
-            aiming.r_x_3d,
-            aiming.r_y_3d,
-            aiming.r_z_3d);
+            world_model.circle_center_world.x,
+            world_model.circle_center_world.y,
+            world_model.circle_center_world.z);
         Eigen::Vector3d normal(
-            aiming.axis_x_3d,
-            aiming.axis_y_3d,
-            aiming.axis_z_3d);
-        const Eigen::Vector3d current(
-            aiming.target_x_3d,
-            aiming.target_y_3d,
-            aiming.target_z_3d);
-        const double radius = aiming.filter_radius;
+            world_model.circle_axis_world.x,
+            world_model.circle_axis_world.y,
+            world_model.circle_axis_world.z);
+        const Eigen::Vector3d observed(
+            world_model.observed_point_world.x,
+            world_model.observed_point_world.y,
+            world_model.observed_point_world.z);
+        const Eigen::Vector3d fitted(
+            world_model.fitted_point_world.x,
+            world_model.fitted_point_world.y,
+            world_model.fitted_point_world.z);
+        const double radius = world_model.circle_radius;
 
-        if (!center.allFinite() || !normal.allFinite() || !current.allFinite() ||
+        if (!center.allFinite() || !normal.allFinite() || !observed.allFinite() ||
+            !fitted.allFinite() ||
             normal.norm() < 1e-6 || radius <= 1e-5) {
             cv::putText(
                 image, "buff world model incomplete", cv::Point(20, 36),
@@ -293,7 +298,7 @@ private:
         }
 
         normal.normalize();
-        Eigen::Vector3d current_axis = current - center;
+        Eigen::Vector3d current_axis = fitted - center;
         current_axis -= normal * current_axis.dot(normal);
         if (current_axis.norm() < 1e-6) {
             current_axis = normal.unitOrthogonal();
@@ -305,7 +310,7 @@ private:
         Eigen::Vector3d basis_v = normal.cross(basis_u).normalized();
 
         Eigen::Isometry3d camera_from_model;
-        if (!lookupCameraFromModel(aiming.header.frame_id, image_stamp, camera_from_model)) {
+        if (!lookupCameraFromModel(world_model.header.frame_id, image_stamp, camera_from_model)) {
             return;
         }
 
@@ -335,7 +340,7 @@ private:
         key_points.reserve(9);
         key_points.push_back(center);
         key_points.push_back(center + normal * radius * normal_length_scale_);
-        key_points.push_back(current);
+        key_points.push_back(observed);
         key_points.push_back(model_current);
         for (int i = 0; i < 5; ++i) {
             key_points.push_back(center + rotateRodrigues(
@@ -392,10 +397,10 @@ private:
                 cv::FONT_HERSHEY_SIMPLEX, 0.55, color, 2);
         }
 
-        const std::string mode = aiming.is_bigbuff == 1 ? "BIG" : "SMALL";
+        const std::string mode = world_model.mode == 1 ? "BIG" : "SMALL";
         const std::string text = "world circle " + mode +
             " r=" + std::to_string(radius).substr(0, 5) +
-            " angle=" + std::to_string(aiming.angle).substr(0, 6);
+            " angle=" + std::to_string(world_model.current_angle).substr(0, 6);
         cv::putText(
             image, text, cv::Point(20, 36),
             cv::FONT_HERSHEY_SIMPLEX, 0.75, cv::Scalar(255, 255, 255), 2);
@@ -403,7 +408,7 @@ private:
 
     std::string image_topic_;
     std::string camera_info_topic_;
-    std::string aiming_topic_;
+    std::string world_model_topic_;
     std::string output_topic_;
     std::string camera_frame_;
 
@@ -425,11 +430,11 @@ private:
 
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
-    rclcpp::Subscription<buff_interfaces::msg::BuffAimingData>::SharedPtr aiming_sub_;
+    rclcpp::Subscription<buff_interfaces::msg::BuffWorldModel>::SharedPtr world_model_sub_;
     rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr image_pub_;
 
-    std::mutex aiming_mutex_;
-    buff_interfaces::msg::BuffAimingData::SharedPtr latest_aiming_;
+    std::mutex world_model_mutex_;
+    buff_interfaces::msg::BuffWorldModel::SharedPtr latest_world_model_;
 };
 
 #include "rclcpp_components/register_node_macro.hpp"

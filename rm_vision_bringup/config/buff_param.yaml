@@ -80,7 +80,7 @@ buff_debug_visualizer_node:
     topics:
       image: /image_raw
       camera_info: /camera_info
-      aiming_data: /buff/aiming_data
+      world_model: /buff/world_model
       output_compressed_image: /buff/world_model_debug_image/compressed
     frames:
       camera: camera_optical_frame

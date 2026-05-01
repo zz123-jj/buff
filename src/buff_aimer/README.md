@@ -1,10 +1,10 @@
 # buff_aimer
 
-`buff_aimer` 接收 `/buff/aiming_data`，预测命中时刻目标位置，解弹道，并发布最终绝对瞄准角。
+`buff_aimer` 接收 `/buff/world_model`，用内部 Rodrigues 旋转器预测命中时刻目标位置，解弹道，并发布最终绝对瞄准角。
 
 输入：
 
-- `/buff/aiming_data`
+- `/buff/world_model`
 
 输出：
 
