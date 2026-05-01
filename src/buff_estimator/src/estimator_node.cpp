@@ -1,11 +1,14 @@
 #include "predictor.hpp"
 #include "world_model.hpp"
 
-#include "buff_interfaces/msg/buff_aiming_data.hpp"
 #include "buff_interfaces/msg/buff_target.hpp"
+#include "buff_interfaces/msg/buff_world_model.hpp"
 
 #include <Eigen/Dense>
+#include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/point_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/vector3.hpp>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -25,6 +28,62 @@
 namespace
 {
 constexpr double kBladeInterval = 2.0 * M_PI / 5.0;
+
+Eigen::Quaterniond transformRotationToEigen(const geometry_msgs::msg::TransformStamped& transform)
+{
+    const auto& rotation = transform.transform.rotation;
+    Eigen::Quaterniond q(rotation.w, rotation.x, rotation.y, rotation.z);
+    q.normalize();
+    return q;
+}
+
+geometry_msgs::msg::Point toPointMsg(const Eigen::Vector3d& p)
+{
+    geometry_msgs::msg::Point msg;
+    msg.x = p.x();
+    msg.y = p.y();
+    msg.z = p.z();
+    return msg;
+}
+
+geometry_msgs::msg::Vector3 toVector3Msg(const Eigen::Vector3d& v)
+{
+    geometry_msgs::msg::Vector3 msg;
+    msg.x = v.x();
+    msg.y = v.y();
+    msg.z = v.z();
+    return msg;
+}
+
+Eigen::Vector3d projectPointToCircle(
+    const buff_estimator::CircleModel& model,
+    const Eigen::Vector3d& p)
+{
+    if (!model.valid || model.radius <= 1e-6)
+    {
+        return p;
+    }
+
+    Eigen::Vector3d radial = p - model.center;
+    radial -= model.normal * radial.dot(model.normal);
+    if (!radial.allFinite() || radial.norm() < 1e-6)
+    {
+        return model.center + model.radius * model.basis_u;
+    }
+    return model.center + model.radius * radial.normalized();
+}
+
+Eigen::Vector3d pointOnCircleAtAngle(
+    const buff_estimator::CircleModel& model,
+    double angle)
+{
+    if (!model.valid || model.radius <= 1e-6)
+    {
+        return Eigen::Vector3d::Zero();
+    }
+    return model.center + model.radius *
+        (std::cos(angle) * model.basis_u + std::sin(angle) * model.basis_v);
+}
 
 }  // namespace
 
@@ -62,8 +121,8 @@ public:
             "/buff/target", rclcpp::SensorDataQoS(),
             [this](const buff_interfaces::msg::BuffTarget::SharedPtr msg) { targetCallback(msg); });
 
-        aiming_pub_ = this->create_publisher<buff_interfaces::msg::BuffAimingData>(
-            "/buff/aiming_data", rclcpp::SensorDataQoS());
+        world_model_pub_ = this->create_publisher<buff_interfaces::msg::BuffWorldModel>(
+            "/buff/world_model", rclcpp::SensorDataQoS());
 
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -72,7 +131,14 @@ public:
             debug_csv_.open(debug_csv_path_);
             if (debug_csv_.is_open()) {
                 debug_csv_
-                    << "t,px,py,pz,model_valid,cx,cy,cz,nx,ny,nz,radius,plane_rms,circle_rms,theta,omega\n";
+                    << "t,px,py,pz,model_valid,cx,cy,cz,nx,ny,nz,radius,plane_rms,circle_rms,angle_span,theta,omega\n";
+            }
+
+            point_debug_csv_.open(debug_points_csv_path_);
+            if (point_debug_csv_.is_open()) {
+                point_debug_csv_
+                    << "t,used_for_fit,reason,raw_px,raw_py,raw_pz,px,py,pz,nx,ny,nz,pcam_x,pcam_y,pcam_z,"
+                    << "reprojection_error,confidence,yolo_target_count,buffer_size\n";
             }
         }
 
@@ -90,6 +156,9 @@ public:
         if (debug_csv_.is_open()) {
             debug_csv_.close();
         }
+        if (point_debug_csv_.is_open()) {
+            point_debug_csv_.close();
+        }
     }
 
 private:
@@ -99,6 +168,7 @@ private:
         this->declare_parameter<std::string>("camera_frame", "camera_optical_frame");
         this->declare_parameter<bool>("debug_mode", true);
         this->declare_parameter<std::string>("debug_csv_path", "buff_estimator_debug.csv");
+        this->declare_parameter<std::string>("debug_points_csv_path", "buff_estimator_points_debug.csv");
         this->declare_parameter<double>("max_reprojection_error_px", 12.0);
         this->declare_parameter<double>("geometry_buffer_sec", 5.0);
         this->declare_parameter<int>("geometry_min_samples", 20);
@@ -106,6 +176,15 @@ private:
         this->declare_parameter<double>("max_model_residual_m", 0.25);
         this->declare_parameter<double>("max_plane_rms_m", 0.08);
         this->declare_parameter<double>("max_circle_rms_m", 0.10);
+        this->declare_parameter<double>("min_fit_angle_span_rad", 0.75);
+        this->declare_parameter<double>("pnp_normal_weight", 0.85);
+        this->declare_parameter<double>("known_circle_radius_m", 0.75);
+        this->declare_parameter<bool>("use_plane_constrained_points", true);
+        this->declare_parameter<double>("plane_normal_alpha", 0.08);
+        this->declare_parameter<double>("plane_offset_alpha", 0.05);
+        this->declare_parameter<bool>("continuity_gate_enabled", true);
+        this->declare_parameter<double>("max_observation_jump_m", 0.55);
+        this->declare_parameter<double>("continuity_reset_sec", 0.35);
         this->declare_parameter<int>("velocity_median_window", 3);
         this->declare_parameter<double>("velocity_sample_window_sec", 4.0);
         this->declare_parameter<double>("max_velocity_sample_abs", 8.0);
@@ -133,6 +212,7 @@ private:
         camera_frame_ = this->get_parameter("camera_frame").as_string();
         debug_mode_ = this->get_parameter("debug_mode").as_bool();
         debug_csv_path_ = this->get_parameter("debug_csv_path").as_string();
+        debug_points_csv_path_ = this->get_parameter("debug_points_csv_path").as_string();
         max_reprojection_error_px_ = this->get_parameter("max_reprojection_error_px").as_double();
         geometry_buffer_sec_ = this->get_parameter("geometry_buffer_sec").as_double();
         geometry_min_samples_ = this->get_parameter("geometry_min_samples").as_int();
@@ -140,6 +220,16 @@ private:
         max_model_residual_m_ = this->get_parameter("max_model_residual_m").as_double();
         max_plane_rms_m_ = this->get_parameter("max_plane_rms_m").as_double();
         max_circle_rms_m_ = this->get_parameter("max_circle_rms_m").as_double();
+        min_fit_angle_span_rad_ = this->get_parameter("min_fit_angle_span_rad").as_double();
+        pnp_normal_weight_ = this->get_parameter("pnp_normal_weight").as_double();
+        known_circle_radius_m_ = this->get_parameter("known_circle_radius_m").as_double();
+        use_plane_constrained_points_ =
+            this->get_parameter("use_plane_constrained_points").as_bool();
+        plane_normal_alpha_ = this->get_parameter("plane_normal_alpha").as_double();
+        plane_offset_alpha_ = this->get_parameter("plane_offset_alpha").as_double();
+        continuity_gate_enabled_ = this->get_parameter("continuity_gate_enabled").as_bool();
+        max_observation_jump_m_ = this->get_parameter("max_observation_jump_m").as_double();
+        continuity_reset_sec_ = this->get_parameter("continuity_reset_sec").as_double();
         velocity_median_window_ = this->get_parameter("velocity_median_window").as_int();
         velocity_sample_window_sec_ = this->get_parameter("velocity_sample_window_sec").as_double();
         max_velocity_sample_abs_ = this->get_parameter("max_velocity_sample_abs").as_double();
@@ -207,6 +297,7 @@ private:
     bool solvePnpHitPoint(
         const buff_interfaces::msg::BuffTarget& msg,
         Eigen::Vector3d& p_camera,
+        Eigen::Vector3d& normal_camera,
         double& reprojection_error)
     {
         if (!has_cam_info_ || !msg.has_target_keypoints) {
@@ -225,7 +316,7 @@ private:
         cv::Vec3d tvec;
         const bool ok = cv::solvePnP(
             object_points_, image_points, camera_matrix_, dist_coeffs_, rvec, tvec,
-            false, cv::SOLVEPNP_ITERATIVE);
+            false, cv::SOLVEPNP_IPPE);
         if (!ok || !std::isfinite(tvec[2]) || tvec[2] <= 0.0) {
             return false;
         }
@@ -250,6 +341,15 @@ private:
             return false;
         }
 
+        normal_camera = Eigen::Vector3d(
+            rotation_mat.at<double>(0, 0),
+            rotation_mat.at<double>(1, 0),
+            rotation_mat.at<double>(2, 0));
+        if (!normal_camera.allFinite() || normal_camera.norm() < 1e-6) {
+            return false;
+        }
+        normal_camera.normalize();
+
         std::vector<cv::Point2f> projected;
         cv::projectPoints(object_points_, rvec, tvec, camera_matrix_, dist_coeffs_, projected);
         double error_sum = 0.0;
@@ -259,6 +359,18 @@ private:
         reprojection_error = error_sum / static_cast<double>(projected.size());
 
         return std::isfinite(reprojection_error);
+    }
+
+    static cv::Point2f imageCenterFromTarget(const buff_interfaces::msg::BuffTarget& msg)
+    {
+        cv::Point2f center(0.0f, 0.0f);
+        for (std::size_t i = 0; i < 4; ++i) {
+            center.x += msg.target_keypoints[i * 2];
+            center.y += msg.target_keypoints[i * 2 + 1];
+        }
+        center.x *= 0.25f;
+        center.y *= 0.25f;
+        return center;
     }
 
     bool cameraToWorld(
@@ -282,6 +394,151 @@ private:
         return p_world.allFinite();
     }
 
+    bool cameraNormalToWorld(
+        const Eigen::Vector3d& normal_camera,
+        const builtin_interfaces::msg::Time& stamp,
+        Eigen::Vector3d& normal_world)
+    {
+        try {
+            const auto tf_stamped = tf_buffer_->lookupTransform(
+                target_frame_, camera_frame_, stamp, std::chrono::milliseconds(10));
+            normal_world = transformRotationToEigen(tf_stamped) * normal_camera;
+        } catch (const tf2::TransformException& first_error) {
+            try {
+                const auto tf_stamped = tf_buffer_->lookupTransform(
+                    target_frame_, camera_frame_, tf2::TimePointZero, std::chrono::milliseconds(10));
+                normal_world = transformRotationToEigen(tf_stamped) * normal_camera;
+            } catch (const tf2::TransformException& second_error) {
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 1000,
+                    "TF normal Error(target=%s, source=%s): %s; latest fallback: %s",
+                    target_frame_.c_str(), camera_frame_.c_str(),
+                    first_error.what(), second_error.what());
+                return false;
+            }
+        }
+
+        if (!normal_world.allFinite() || normal_world.norm() < 1e-6) {
+            return false;
+        }
+        normal_world.normalize();
+        return true;
+    }
+
+    bool cameraRayToWorld(
+        const cv::Point2f& image_point,
+        const builtin_interfaces::msg::Time& stamp,
+        Eigen::Vector3d& ray_origin_world,
+        Eigen::Vector3d& ray_direction_world)
+    {
+        std::vector<cv::Point2f> input{image_point};
+        std::vector<cv::Point2f> undistorted;
+        cv::undistortPoints(input, undistorted, camera_matrix_, dist_coeffs_);
+        if (undistorted.empty()) {
+            return false;
+        }
+
+        const Eigen::Vector3d ray_camera(
+            undistorted[0].x,
+            undistorted[0].y,
+            1.0);
+
+        try {
+            const auto tf_stamped = tf_buffer_->lookupTransform(
+                target_frame_, camera_frame_, stamp, std::chrono::milliseconds(10));
+            const auto rotation = transformRotationToEigen(tf_stamped);
+            ray_origin_world = Eigen::Vector3d(
+                tf_stamped.transform.translation.x,
+                tf_stamped.transform.translation.y,
+                tf_stamped.transform.translation.z);
+            ray_direction_world = rotation * ray_camera;
+        } catch (const tf2::TransformException& first_error) {
+            try {
+                const auto tf_stamped = tf_buffer_->lookupTransform(
+                    target_frame_, camera_frame_, tf2::TimePointZero, std::chrono::milliseconds(10));
+                const auto rotation = transformRotationToEigen(tf_stamped);
+                ray_origin_world = Eigen::Vector3d(
+                    tf_stamped.transform.translation.x,
+                    tf_stamped.transform.translation.y,
+                    tf_stamped.transform.translation.z);
+                ray_direction_world = rotation * ray_camera;
+            } catch (const tf2::TransformException& second_error) {
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 1000,
+                    "TF ray Error(target=%s, source=%s): %s; latest fallback: %s",
+                    target_frame_.c_str(), camera_frame_.c_str(),
+                    first_error.what(), second_error.what());
+                return false;
+            }
+        }
+
+        if (!ray_origin_world.allFinite() ||
+            !ray_direction_world.allFinite() ||
+            ray_direction_world.norm() < 1e-6) {
+            return false;
+        }
+        ray_direction_world.normalize();
+        return true;
+    }
+
+    void updateObservationPlane(const Eigen::Vector3d& p_world, Eigen::Vector3d normal_world)
+    {
+        if (!normal_world.allFinite() || normal_world.norm() < 1e-6) {
+            return;
+        }
+        normal_world.normalize();
+
+        if (!has_observation_plane_) {
+            observation_plane_normal_ = normal_world;
+            observation_plane_offset_ = observation_plane_normal_.dot(p_world);
+            has_observation_plane_ = true;
+            return;
+        }
+
+        if (normal_world.dot(observation_plane_normal_) < 0.0) {
+            normal_world = -normal_world;
+        }
+
+        const double normal_alpha = std::clamp(plane_normal_alpha_, 0.0, 1.0);
+        const double offset_alpha = std::clamp(plane_offset_alpha_, 0.0, 1.0);
+        observation_plane_normal_ =
+            ((1.0 - normal_alpha) * observation_plane_normal_ + normal_alpha * normal_world)
+                .normalized();
+        const double measured_offset = observation_plane_normal_.dot(p_world);
+        observation_plane_offset_ =
+            (1.0 - offset_alpha) * observation_plane_offset_ + offset_alpha * measured_offset;
+    }
+
+    bool constrainPointToObservationPlane(
+        const cv::Point2f& image_center,
+        const builtin_interfaces::msg::Time& stamp,
+        Eigen::Vector3d& p_world)
+    {
+        if (!use_plane_constrained_points_ || !has_observation_plane_) {
+            return false;
+        }
+
+        Eigen::Vector3d ray_origin_world;
+        Eigen::Vector3d ray_direction_world;
+        if (!cameraRayToWorld(image_center, stamp, ray_origin_world, ray_direction_world)) {
+            return false;
+        }
+
+        const double denom = observation_plane_normal_.dot(ray_direction_world);
+        if (std::abs(denom) < 1e-6) {
+            return false;
+        }
+
+        const double ray_t =
+            (observation_plane_offset_ - observation_plane_normal_.dot(ray_origin_world)) / denom;
+        if (!std::isfinite(ray_t) || ray_t <= 0.0) {
+            return false;
+        }
+
+        p_world = ray_origin_world + ray_t * ray_direction_world;
+        return p_world.allFinite();
+    }
+
     void tryUpdateCircleModel(double now)
     {
         if (point_buffer_.size() < static_cast<std::size_t>(geometry_min_samples_) ||
@@ -290,15 +547,22 @@ private:
         }
 
         buff_estimator::CircleModel fitted;
-        if (!buff_estimator::WorldCircleFitter::fit(point_buffer_.samples(), circle_model_, fitted)) {
+        if (!buff_estimator::WorldCircleFitter::fit(
+                point_buffer_.samples(),
+                circle_model_,
+                pnp_normal_weight_,
+                known_circle_radius_m_,
+                fitted)) {
             return;
         }
 
-        if (fitted.plane_rms > max_plane_rms_m_ || fitted.circle_rms > max_circle_rms_m_) {
+        if (fitted.plane_rms > max_plane_rms_m_ ||
+            fitted.circle_rms > max_circle_rms_m_ ||
+            fitted.angle_span < min_fit_angle_span_rad_) {
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
-                "Reject circle fit: plane_rms=%.3f circle_rms=%.3f samples=%d",
-                fitted.plane_rms, fitted.circle_rms, fitted.sample_count);
+                "Reject circle fit: plane_rms=%.3f circle_rms=%.3f angle_span=%.3f samples=%d",
+                fitted.plane_rms, fitted.circle_rms, fitted.angle_span, fitted.sample_count);
             return;
         }
 
@@ -368,16 +632,47 @@ private:
         return true;
     }
 
+    bool acceptContinuousObservation(double now, const Eigen::Vector3d& p_world)
+    {
+        if (!continuity_gate_enabled_) {
+            last_accepted_world_point_ = p_world;
+            last_accepted_observation_time_ = now;
+            has_last_accepted_observation_ = true;
+            return true;
+        }
+
+        if (!has_last_accepted_observation_ ||
+            now - last_accepted_observation_time_ > continuity_reset_sec_) {
+            last_accepted_world_point_ = p_world;
+            last_accepted_observation_time_ = now;
+            has_last_accepted_observation_ = true;
+            return true;
+        }
+
+        const double jump = (p_world - last_accepted_world_point_).norm();
+        if (jump > max_observation_jump_m_) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 1000,
+                "Reject discontinuous YOLO observation: jump=%.3f m limit=%.3f m",
+                jump, max_observation_jump_m_);
+            return false;
+        }
+
+        last_accepted_world_point_ = p_world;
+        last_accepted_observation_time_ = now;
+        return true;
+    }
+
     void targetCallback(const buff_interfaces::msg::BuffTarget::SharedPtr msg)
     {
-        buff_interfaces::msg::BuffAimingData aiming_msg;
-        aiming_msg.header = msg->header;
-        aiming_msg.header.frame_id = target_frame_;
-        aiming_msg.is_bigbuff = msg->is_bigbuff;
+        buff_interfaces::msg::BuffWorldModel model_msg;
+        model_msg.header = msg->header;
+        model_msg.header.frame_id = target_frame_;
+        model_msg.mode = msg->is_bigbuff;
 
         if (!msg->is_tracking || !msg->has_target_keypoints || !has_cam_info_) {
-            setDefaultAimingMsg(aiming_msg, msg->is_bigbuff);
-            aiming_pub_->publish(aiming_msg);
+            setDefaultWorldModel(model_msg, msg->is_bigbuff);
+            world_model_pub_->publish(model_msg);
             return;
         }
 
@@ -387,34 +682,80 @@ private:
         }
 
         Eigen::Vector3d p_camera;
+        Eigen::Vector3d normal_camera;
         double reprojection_error = 0.0;
-        if (!solvePnpHitPoint(*msg, p_camera, reprojection_error)) {
-            setDefaultAimingMsg(aiming_msg, msg->is_bigbuff);
-            aiming_pub_->publish(aiming_msg);
+        if (!solvePnpHitPoint(*msg, p_camera, normal_camera, reprojection_error)) {
+            setDefaultWorldModel(model_msg, msg->is_bigbuff);
+            world_model_pub_->publish(model_msg);
             return;
         }
         if (reprojection_error > max_reprojection_error_px_) {
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
                 "Reject PnP observation: reprojection_error=%.2f px", reprojection_error);
-            setDefaultAimingMsg(aiming_msg, msg->is_bigbuff);
-            aiming_pub_->publish(aiming_msg);
+            setDefaultWorldModel(model_msg, msg->is_bigbuff);
+            model_msg.observed_point_camera = toPointMsg(p_camera);
+            model_msg.depth = static_cast<float>(p_camera.z());
+            world_model_pub_->publish(model_msg);
             return;
         }
 
         Eigen::Vector3d p_world;
         if (!cameraToWorld(p_camera, msg->header.stamp, p_world)) {
-            setDefaultAimingMsg(aiming_msg, msg->is_bigbuff);
-            aiming_pub_->publish(aiming_msg);
+            setDefaultWorldModel(model_msg, msg->is_bigbuff);
+            model_msg.observed_point_camera = toPointMsg(p_camera);
+            model_msg.depth = static_cast<float>(p_camera.z());
+            world_model_pub_->publish(model_msg);
             return;
         }
 
+        Eigen::Vector3d normal_world;
+        if (!cameraNormalToWorld(normal_camera, msg->header.stamp, normal_world)) {
+            setDefaultWorldModel(model_msg, msg->is_bigbuff);
+            model_msg.observed_point_world = toPointMsg(p_world);
+            model_msg.fitted_point_world = toPointMsg(p_world);
+            model_msg.observed_point_camera = toPointMsg(p_camera);
+            model_msg.depth = static_cast<float>(p_camera.z());
+            world_model_pub_->publish(model_msg);
+            return;
+        }
+
+        const Eigen::Vector3d raw_p_world = p_world;
+        updateObservationPlane(raw_p_world, normal_world);
+        const cv::Point2f image_center = imageCenterFromTarget(*msg);
+        const bool plane_constrained =
+            constrainPointToObservationPlane(image_center, msg->header.stamp, p_world);
+
         const double now = rclcpp::Time(msg->header.stamp).seconds();
+        if (!acceptContinuousObservation(now, p_world)) {
+            writePointDebugRow(
+                now, false, plane_constrained ? "discontinuous_plane" : "discontinuous_raw",
+                raw_p_world, p_world, normal_world, p_camera, reprojection_error,
+                msg->pose_confidence, msg->yolo_target_count);
+            setDefaultWorldModel(model_msg, msg->is_bigbuff);
+            model_msg.observed_point_world = toPointMsg(p_world);
+            model_msg.fitted_point_world = toPointMsg(projectPointToCircle(circle_model_, p_world));
+            model_msg.observed_point_camera = toPointMsg(p_camera);
+            model_msg.depth = static_cast<float>(p_camera.z());
+            model_msg.observation_confidence = msg->pose_confidence;
+            model_msg.yolo_target_count = msg->yolo_target_count;
+            world_model_pub_->publish(model_msg);
+            return;
+        }
+
         if (!circle_model_.valid ||
             max_model_residual_m_ <= 0.0 ||
             buff_estimator::WorldCircleFitter::radialResidual(circle_model_, p_world) < max_model_residual_m_) {
-            point_buffer_.push(now, p_world, msg->pose_confidence);
+            point_buffer_.push(now, p_world, normal_world, msg->pose_confidence);
+            writePointDebugRow(
+                now, true, plane_constrained ? "used_plane" : "used_raw",
+                raw_p_world, p_world, normal_world, p_camera, reprojection_error,
+                msg->pose_confidence, msg->yolo_target_count);
         } else {
+            writePointDebugRow(
+                now, false, plane_constrained ? "model_outlier_plane" : "model_outlier_raw",
+                raw_p_world, p_world, normal_world, p_camera, reprojection_error,
+                msg->pose_confidence, msg->yolo_target_count);
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
                 "Skip outlier point for circle model, residual=%.3f",
@@ -424,33 +765,36 @@ private:
         tryUpdateCircleModel(now);
         const bool has_angle = updateAngularState(now, p_world, msg->is_bigbuff);
 
-        aiming_msg.is_tracking = circle_model_.valid && has_angle;
-        aiming_msg.spin_direction = world_spin_direction_ != 0 ? world_spin_direction_ : msg->spin_direction;
-        aiming_msg.r_cam_x_3d = static_cast<float>(p_camera.x());
-        aiming_msg.r_cam_y_3d = static_cast<float>(p_camera.y());
-        aiming_msg.r_cam_z_3d = static_cast<float>(p_camera.z());
-        aiming_msg.depth = static_cast<float>(p_camera.z());
-        aiming_msg.target_x_3d = static_cast<float>(p_world.x());
-        aiming_msg.target_y_3d = static_cast<float>(p_world.y());
-        aiming_msg.target_z_3d = static_cast<float>(p_world.z());
-        aiming_msg.filter_radius = circle_model_.valid
+        const Eigen::Vector3d fitted_p_world = circle_model_.valid && has_angle
+            ? pointOnCircleAtAngle(circle_model_, last_theta_)
+            : projectPointToCircle(circle_model_, p_world);
+
+        model_msg.valid = circle_model_.valid && has_angle;
+        model_msg.spin_direction = world_spin_direction_ != 0 ? world_spin_direction_ : msg->spin_direction;
+        model_msg.observed_point_world = toPointMsg(p_world);
+        model_msg.fitted_point_world = toPointMsg(fitted_p_world);
+        model_msg.observed_point_camera = toPointMsg(p_camera);
+        model_msg.depth = static_cast<float>(p_camera.z());
+        model_msg.circle_radius = circle_model_.valid
             ? static_cast<float>(circle_model_.radius)
             : 0.0f;
-        aiming_msg.angle = has_angle ? static_cast<float>(last_theta_) : 0.0f;
+        model_msg.current_angle = has_angle ? static_cast<float>(last_theta_) : 0.0f;
+        model_msg.angular_velocity = static_cast<float>(last_velocity_);
+        model_msg.observation_confidence = msg->pose_confidence;
+        model_msg.yolo_target_count = msg->yolo_target_count;
 
         if (circle_model_.valid) {
-            aiming_msg.r_x_3d = static_cast<float>(circle_model_.center.x());
-            aiming_msg.r_y_3d = static_cast<float>(circle_model_.center.y());
-            aiming_msg.r_z_3d = static_cast<float>(circle_model_.center.z());
-            aiming_msg.axis_x_3d = static_cast<float>(circle_model_.normal.x());
-            aiming_msg.axis_y_3d = static_cast<float>(circle_model_.normal.y());
-            aiming_msg.axis_z_3d = static_cast<float>(circle_model_.normal.z());
+            model_msg.circle_center_world = toPointMsg(circle_model_.center);
+            model_msg.circle_axis_world = toVector3Msg(circle_model_.normal);
+            model_msg.plane_rms = static_cast<float>(circle_model_.plane_rms);
+            model_msg.circle_rms = static_cast<float>(circle_model_.circle_rms);
+            model_msg.angle_span = static_cast<float>(circle_model_.angle_span);
         }
 
-        fillVelocityFields(aiming_msg, msg->is_bigbuff);
-        writeDebugRow(now, p_world, aiming_msg);
+        fillVelocityFields(model_msg, msg->is_bigbuff);
+        writeDebugRow(now, p_world, model_msg);
 
-        aiming_pub_->publish(aiming_msg);
+        world_model_pub_->publish(model_msg);
     }
 
     void fillVelocityFields(buff_interfaces::msg::BuffAimingData& aiming_msg, int8_t mode)
@@ -520,6 +864,12 @@ private:
         last_velocity_ = 0.0;
         world_spin_direction_ = 0;
         last_blade_jump_ = false;
+        has_last_accepted_observation_ = false;
+        last_accepted_observation_time_ = 0.0;
+        last_accepted_world_point_ = Eigen::Vector3d::Zero();
+        has_observation_plane_ = false;
+        observation_plane_normal_ = Eigen::Vector3d::UnitZ();
+        observation_plane_offset_ = 0.0;
     }
 
     void writeDebugRow(
@@ -545,8 +895,46 @@ private:
                    << circle_model_.radius << ','
                    << circle_model_.plane_rms << ','
                    << circle_model_.circle_rms << ','
+                   << circle_model_.angle_span << ','
                    << aiming_msg.angle << ','
                    << last_velocity_ << '\n';
+    }
+
+    void writePointDebugRow(
+        double now,
+        bool used_for_fit,
+        const std::string& reason,
+        const Eigen::Vector3d& raw_p_world,
+        const Eigen::Vector3d& p_world,
+        const Eigen::Vector3d& normal_world,
+        const Eigen::Vector3d& p_camera,
+        double reprojection_error,
+        double confidence,
+        int yolo_target_count)
+    {
+        if (!point_debug_csv_.is_open()) {
+            return;
+        }
+
+        point_debug_csv_ << now << ','
+                         << (used_for_fit ? 1 : 0) << ','
+                         << reason << ','
+                         << raw_p_world.x() << ','
+                         << raw_p_world.y() << ','
+                         << raw_p_world.z() << ','
+                         << p_world.x() << ','
+                         << p_world.y() << ','
+                         << p_world.z() << ','
+                         << normal_world.x() << ','
+                         << normal_world.y() << ','
+                         << normal_world.z() << ','
+                         << p_camera.x() << ','
+                         << p_camera.y() << ','
+                         << p_camera.z() << ','
+                         << reprojection_error << ','
+                         << confidence << ','
+                         << yolo_target_count << ','
+                         << point_buffer_.size() << '\n';
     }
 
     rclcpp::Subscription<buff_interfaces::msg::BuffTarget>::SharedPtr target_sub_;
@@ -563,19 +951,24 @@ private:
 
     cv::Mat camera_matrix_;
     cv::Mat dist_coeffs_;
+    // Same keypoint geometry as the measured blade target, translated so the hit point is
+    // the object origin. This keeps solvePnP's tvec at the aiming point and avoids
+    // amplifying pose jitter through a 0.7 m offset.
     std::vector<cv::Point3f> object_points_{
-        cv::Point3f(0.0f, 0.0f, 827e-3f),
-        cv::Point3f(0.0f, 127e-3f, 700e-3f),
-        cv::Point3f(0.0f, 0.0f, 573e-3f),
-        cv::Point3f(0.0f, -127e-3f, 700e-3f),
+        cv::Point3f(0.0f, 0.0f, 127e-3f),
+        cv::Point3f(0.0f, 127e-3f, 0.0f),
+        cv::Point3f(0.0f, 0.0f, -127e-3f),
+        cv::Point3f(0.0f, -127e-3f, 0.0f),
     };
-    cv::Point3f hit_point_object_{0.0f, 0.0f, 700e-3f};
+    cv::Point3f hit_point_object_{0.0f, 0.0f, 0.0f};
 
     std::string target_frame_ = "odom";
     std::string camera_frame_ = "camera_optical_frame";
     bool debug_mode_ = true;
     std::string debug_csv_path_ = "buff_estimator_debug.csv";
+    std::string debug_points_csv_path_ = "buff_estimator_points_debug.csv";
     std::ofstream debug_csv_;
+    std::ofstream point_debug_csv_;
 
     bool has_cam_info_ = false;
     double max_reprojection_error_px_ = 12.0;
@@ -585,6 +978,15 @@ private:
     double max_model_residual_m_ = 0.25;
     double max_plane_rms_m_ = 0.08;
     double max_circle_rms_m_ = 0.10;
+    double min_fit_angle_span_rad_ = 0.75;
+    double pnp_normal_weight_ = 0.85;
+    double known_circle_radius_m_ = 0.75;
+    bool use_plane_constrained_points_ = true;
+    double plane_normal_alpha_ = 0.08;
+    double plane_offset_alpha_ = 0.05;
+    bool continuity_gate_enabled_ = true;
+    double max_observation_jump_m_ = 0.55;
+    double continuity_reset_sec_ = 0.35;
 
     int velocity_median_window_ = 3;
     double velocity_sample_window_sec_ = 4.0;
@@ -600,11 +1002,17 @@ private:
     int8_t world_spin_direction_ = 0;
     bool has_last_angle_ = false;
     bool has_fit_start_time_ = false;
+    bool has_last_accepted_observation_ = false;
+    bool has_observation_plane_ = false;
     bool last_blade_jump_ = false;
+    Eigen::Vector3d last_accepted_world_point_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d observation_plane_normal_ = Eigen::Vector3d::UnitZ();
     double fit_start_time_ = 0.0;
     double last_theta_ = 0.0;
     double last_angle_time_ = 0.0;
     double last_velocity_ = 0.0;
+    double last_accepted_observation_time_ = 0.0;
+    double observation_plane_offset_ = 0.0;
 };
 
 #include "rclcpp_components/register_node_macro.hpp"

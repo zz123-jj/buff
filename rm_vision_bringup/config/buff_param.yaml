@@ -12,6 +12,7 @@ buff_detector_node:
       debug_mode: true
       image_reliable: true
       buff_mode: auto
+      mode_judge_far_distance_px: 80.0
 
 
 
@@ -23,13 +24,23 @@ buff_estimator_node:
     camera_frame: camera_optical_frame
     debug_mode: true
     debug_csv_path: buff_estimator_debug.csv
+    debug_points_csv_path: buff_estimator_points_debug.csv
     max_reprojection_error_px: 12.0
     geometry_buffer_sec: 5.0
     geometry_min_samples: 20
     geometry_min_span_sec: 1.0
     max_model_residual_m: 0.25
-    max_plane_rms_m: 0.08
+    max_plane_rms_m: 0.25
     max_circle_rms_m: 0.10
+    min_fit_angle_span_rad: 0.75
+    pnp_normal_weight: 0.85
+    known_circle_radius_m: 0.70
+    use_plane_constrained_points: true
+    plane_normal_alpha: 0.08
+    plane_offset_alpha: 0.05
+    continuity_gate_enabled: true
+    max_observation_jump_m: 0.55
+    continuity_reset_sec: 0.35
     velocity_median_window: 3
     velocity_sample_window_sec: 4.0
     max_velocity_sample_abs: 8.0
@@ -70,9 +81,12 @@ buff_debug_visualizer_node:
       image: /image_raw
       camera_info: /camera_info
       aiming_data: /buff/aiming_data
-      output_image: /buff/world_model_debug_image
+      output_compressed_image: /buff/world_model_debug_image/compressed
     frames:
       camera: camera_optical_frame
     circle_samples: 144
     normal_length_scale: 0.8
     stale_timeout_sec: 0.25
+    max_publish_hz: 0.0
+    output_scale: 0.5
+    jpeg_quality: 80

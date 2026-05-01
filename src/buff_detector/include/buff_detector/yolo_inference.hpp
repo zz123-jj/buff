@@ -7,6 +7,13 @@
 #include <string>
 #include <vector>
 
+struct BuffPoseCandidate
+{
+    float confidence = 0.0f;
+    std::vector<cv::Point2f> keypoints;
+    cv::Rect fan_box;
+};
+
 struct BuffPoseResult
 {
     float confidence = 0.0f;
@@ -14,6 +21,8 @@ struct BuffPoseResult
     cv::Rect fan_box;
     cv::Rect r_box;
     int target_count = 0;
+    std::vector<BuffPoseCandidate> candidates;
+    std::size_t selected_index = 0;
 };
 
 class BuffYoloPoseOpenVINO
@@ -46,6 +55,7 @@ private:
     ) const;
     cv::Rect detect_r_box(const std::vector<cv::Point2f>& keypoints, const cv::Mat& bgr_image) const;
     cv::Rect clamp_rect(const cv::Rect2f& rect, const cv::Size& image_size) const;
+    void note_missed_detection();
     void warm_up();
 
     ov::Core core_;
@@ -59,4 +69,7 @@ private:
     float confidence_threshold_ = 0.7f;
     std::size_t keypoint_count_ = 6;
     int input_size_ = 640;
+    bool has_last_target_center_ = false;
+    cv::Point2f last_target_center_;
+    int missed_frame_count_ = 0;
 };

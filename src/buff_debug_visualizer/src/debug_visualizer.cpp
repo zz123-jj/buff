@@ -17,10 +17,12 @@
 #endif
 
 #include <opencv2/calib3d.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -67,17 +69,22 @@ public:
         declare_parameter<std::string>("topics.image", "/image_raw");
         declare_parameter<std::string>("topics.camera_info", "/camera_info");
         declare_parameter<std::string>("topics.aiming_data", "/buff/aiming_data");
-        declare_parameter<std::string>("topics.output_image", "/buff/world_model_debug_image");
+        declare_parameter<std::string>(
+            "topics.output_compressed_image",
+            "/buff/world_model_debug_image/compressed");
         declare_parameter<std::string>("frames.camera", "camera_optical_frame");
         declare_parameter<bool>("enabled", true);
         declare_parameter<int>("circle_samples", 144);
         declare_parameter<double>("normal_length_scale", 0.8);
         declare_parameter<double>("stale_timeout_sec", 0.25);
+        declare_parameter<double>("max_publish_hz", 0.0);
+        declare_parameter<double>("output_scale", 0.5);
+        declare_parameter<int>("jpeg_quality", 80);
 
         image_topic_ = get_parameter("topics.image").as_string();
         camera_info_topic_ = get_parameter("topics.camera_info").as_string();
         aiming_topic_ = get_parameter("topics.aiming_data").as_string();
-        output_topic_ = get_parameter("topics.output_image").as_string();
+        output_topic_ = get_parameter("topics.output_compressed_image").as_string();
         camera_frame_ = get_parameter("frames.camera").as_string();
         enabled_ = get_parameter("enabled").as_bool();
         circle_samples_ = std::max(
@@ -85,6 +92,10 @@ public:
             static_cast<int>(get_parameter("circle_samples").as_int()));
         normal_length_scale_ = get_parameter("normal_length_scale").as_double();
         stale_timeout_sec_ = get_parameter("stale_timeout_sec").as_double();
+        max_publish_hz_ = get_parameter("max_publish_hz").as_double();
+        output_scale_ = std::clamp(get_parameter("output_scale").as_double(), 0.05, 1.0);
+        jpeg_quality_ = std::clamp(
+            static_cast<int>(get_parameter("jpeg_quality").as_int()), 1, 100);
 
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -104,12 +115,13 @@ public:
                 latest_aiming_ = msg;
             });
 
-        image_pub_ = create_publisher<sensor_msgs::msg::Image>(output_topic_, rclcpp::SensorDataQoS());
+        image_pub_ = create_publisher<sensor_msgs::msg::CompressedImage>(
+            output_topic_, rclcpp::SensorDataQoS());
 
         RCLCPP_INFO(
             get_logger(),
-            "BuffDebugVisualizer started. output=%s",
-            output_topic_.c_str());
+            "BuffDebugVisualizer started. compressed_output=%s scale=%.2f jpeg_quality=%d",
+            output_topic_.c_str(), output_scale_, jpeg_quality_);
     }
 
 private:
@@ -134,6 +146,14 @@ private:
     {
         if (!enabled_ || !has_camera_info_) {
             return;
+        }
+
+        const rclcpp::Time now = get_clock()->now();
+        if (max_publish_hz_ > 0.0 && last_publish_time_.nanoseconds() != 0) {
+            const double interval = (now - last_publish_time_).seconds();
+            if (interval < 1.0 / max_publish_hz_) {
+                return;
+            }
         }
 
         cv::Mat image;
@@ -168,9 +188,22 @@ private:
                 cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 0, 255), 2);
         }
 
-        auto output = cv_bridge::CvImage(msg->header, "bgr8", image).toImageMsg();
-        output->header.frame_id = msg->header.frame_id;
-        image_pub_->publish(*output);
+        if (output_scale_ > 0.0 && output_scale_ < 1.0) {
+            cv::resize(image, image, cv::Size(), output_scale_, output_scale_, cv::INTER_AREA);
+        }
+
+        sensor_msgs::msg::CompressedImage output;
+        output.header = msg->header;
+        output.format = "bgr8; jpeg compressed bgr8";
+        const std::vector<int> params{cv::IMWRITE_JPEG_QUALITY, jpeg_quality_};
+        if (!cv::imencode(".jpg", image, output.data, params)) {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 1000,
+                "Failed to encode buff world model debug image as JPEG.");
+            return;
+        }
+        image_pub_->publish(output);
+        last_publish_time_ = now;
     }
 
     bool lookupCameraFromModel(
@@ -260,12 +293,15 @@ private:
         }
 
         normal.normalize();
-        Eigen::Vector3d basis_u = current - center;
-        basis_u -= normal * basis_u.dot(normal);
-        if (basis_u.norm() < 1e-6) {
-            basis_u = normal.unitOrthogonal() * radius;
+        Eigen::Vector3d current_axis = current - center;
+        current_axis -= normal * current_axis.dot(normal);
+        if (current_axis.norm() < 1e-6) {
+            current_axis = normal.unitOrthogonal();
+        } else {
+            current_axis.normalize();
         }
-        basis_u.normalize();
+        const Eigen::Vector3d model_current = center + radius * current_axis;
+        Eigen::Vector3d basis_u = current_axis;
         Eigen::Vector3d basis_v = normal.cross(basis_u).normalized();
 
         Eigen::Isometry3d camera_from_model;
@@ -296,13 +332,14 @@ private:
         }
 
         std::vector<Eigen::Vector3d> key_points;
-        key_points.reserve(8);
+        key_points.reserve(9);
         key_points.push_back(center);
         key_points.push_back(center + normal * radius * normal_length_scale_);
         key_points.push_back(current);
+        key_points.push_back(model_current);
         for (int i = 0; i < 5; ++i) {
             key_points.push_back(center + rotateRodrigues(
-                current - center, normal, static_cast<double>(i) * kBladeInterval));
+                model_current - center, normal, static_cast<double>(i) * kBladeInterval));
         }
 
         std::vector<cv::Point2f> pixels;
@@ -334,8 +371,15 @@ private:
                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 2);
         }
 
+        if (visible[3]) {
+            cv::circle(image, pixels[3], 6, cv::Scalar(0, 255, 0), -1, cv::LINE_AA);
+            cv::putText(
+                image, "fit", pixels[3] + cv::Point2f(8.0f, -10.0f),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 2);
+        }
+
         for (int i = 0; i < 5; ++i) {
-            const std::size_t idx = static_cast<std::size_t>(3 + i);
+            const std::size_t idx = static_cast<std::size_t>(4 + i);
             if (!visible[idx]) {
                 continue;
             }
@@ -367,7 +411,11 @@ private:
     int circle_samples_ = 144;
     double normal_length_scale_ = 0.8;
     double stale_timeout_sec_ = 0.25;
+    double max_publish_hz_ = 0.0;
+    double output_scale_ = 0.5;
+    int jpeg_quality_ = 80;
     bool has_camera_info_ = false;
+    rclcpp::Time last_publish_time_{0, 0, RCL_ROS_TIME};
 
     cv::Mat camera_matrix_;
     cv::Mat dist_coeffs_;
@@ -378,7 +426,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
     rclcpp::Subscription<buff_interfaces::msg::BuffAimingData>::SharedPtr aiming_sub_;
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr image_pub_;
 
     std::mutex aiming_mutex_;
     buff_interfaces::msg::BuffAimingData::SharedPtr latest_aiming_;

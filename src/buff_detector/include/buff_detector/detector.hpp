@@ -16,6 +16,7 @@ struct BuffDetectorConfig
     cv::Scalar upper_hsv = cv::Scalar(70, 255, 255);
     int dilate_kernel_size = 7;
     std::string buff_mode = "auto";
+    float mode_judge_far_distance_px = 80.0f;
 };
 
 float euclidean_distance(const cv::Point2f& p1, const cv::Point2f& p2); // 计算两点间的欧氏距离
@@ -158,4 +159,10 @@ public:
     cv::Mat roi_frame_;               // 扇叶ROI图像            // 获取调试图像
     int max_lighted_blade_num_ = 0; 
     BuffType get_buff_type() const { return buff_type_; } // 获取当前buff模式
+    bool is_buff_type_locked() const { return buff_type_locked_; }
+
+private:
+    bool buff_type_locked_ = false;
+    bool has_last_secondary_target_box_ = false;
+    BBox last_secondary_target_box_;
 };

@@ -11,13 +11,11 @@ namespace
 constexpr float kMinRBoxSize = 8.0f;
 constexpr int kRThreshold = 100;
 constexpr float kNmsThreshold = 0.45f;
+constexpr float kTemporalMinConfidenceRatio = 0.65f;
+constexpr float kTemporalTieDistancePx = 6.0f;
+constexpr int kMaxMissedFramesBeforeReset = 5;
 
-struct PoseCandidate
-{
-    float confidence = 0.0f;
-    std::vector<cv::Point2f> keypoints;
-    cv::Rect fan_box;
-};
+using PoseCandidate = BuffPoseCandidate;
 
 float rect_iou(const cv::Rect& a, const cv::Rect& b)
 {
@@ -28,6 +26,14 @@ float rect_iou(const cv::Rect& a, const cv::Rect& b)
         return 0.0f;
     }
     return static_cast<float>(intersection) / static_cast<float>(union_area);
+}
+
+cv::Point2f rect_center(const cv::Rect& rect)
+{
+    return {
+        rect.x + rect.width * 0.5f,
+        rect.y + rect.height * 0.5f
+    };
 }
 
 template<typename T>
@@ -56,6 +62,8 @@ bool BuffYoloPoseOpenVINO::create_session(
         confidence_threshold_ = confidence_threshold;
         keypoint_count_ = keypoint_count;
         input_size_ = input_size;
+        has_last_target_center_ = false;
+        missed_frame_count_ = 0;
 
         model_ = core_.read_model(model_path);
         compiled_model_ = core_.compile_model(model_, device_name_);
@@ -89,6 +97,7 @@ bool BuffYoloPoseOpenVINO::run(const cv::Mat& bgr_image, BuffPoseResult& result)
         BuffPoseResult parsed;
         if (!parse_output(infer_request_.get_output_tensor(), scale_factor, bgr_image.size(), parsed))
         {
+            note_missed_detection();
             return false;
         }
 
@@ -96,16 +105,19 @@ bool BuffYoloPoseOpenVINO::run(const cv::Mat& bgr_image, BuffPoseResult& result)
         if (parsed.fan_box.area() <= 0 || parsed.r_box.area() <= 0)
         {
             last_error_ = "invalid fan or R box from pose keypoints";
+            note_missed_detection();
             return false;
         }
 
         result = std::move(parsed);
+        missed_frame_count_ = 0;
         last_error_.clear();
         return true;
     }
     catch (const std::exception& e)
     {
         last_error_ = e.what();
+        note_missed_detection();
         return false;
     }
 }
@@ -276,10 +288,43 @@ bool BuffYoloPoseOpenVINO::parse_output(
         }
     }
 
-    result.confidence = kept.front().confidence;
-    result.keypoints = kept.front().keypoints;
-    result.fan_box = kept.front().fan_box;
+    std::size_t selected_index = 0;
+    if (has_last_target_center_ && kept.size() > 1)
+    {
+        const float best_confidence = kept.front().confidence;
+        float best_distance = std::numeric_limits<float>::max();
+        float best_selected_confidence = 0.0f;
+
+        for (std::size_t i = 0; i < kept.size(); ++i)
+        {
+            if (kept[i].confidence < best_confidence * kTemporalMinConfidenceRatio)
+            {
+                continue;
+            }
+
+            const float distance =
+                static_cast<float>(cv::norm(rect_center(kept[i].fan_box) - last_target_center_));
+            if (distance + kTemporalTieDistancePx < best_distance ||
+                (std::abs(distance - best_distance) <= kTemporalTieDistancePx &&
+                 kept[i].confidence > best_selected_confidence))
+            {
+                selected_index = i;
+                best_distance = distance;
+                best_selected_confidence = kept[i].confidence;
+            }
+        }
+    }
+
+    const PoseCandidate& selected = kept[selected_index];
+    last_target_center_ = rect_center(selected.fan_box);
+    has_last_target_center_ = true;
+
+    result.confidence = selected.confidence;
+    result.keypoints = selected.keypoints;
+    result.fan_box = selected.fan_box;
     result.target_count = static_cast<int>(kept.size());
+    result.candidates = kept;
+    result.selected_index = selected_index;
     return true;
 }
 
@@ -308,6 +353,16 @@ cv::Rect BuffYoloPoseOpenVINO::keypoints_to_rect(
     }
 
     return clamp_rect(cv::Rect2f(x_min, y_min, x_max - x_min, y_max - y_min), image_size);
+}
+
+void BuffYoloPoseOpenVINO::note_missed_detection()
+{
+    ++missed_frame_count_;
+    if (missed_frame_count_ > kMaxMissedFramesBeforeReset)
+    {
+        has_last_target_center_ = false;
+        missed_frame_count_ = 0;
+    }
 }
 
 cv::Rect BuffYoloPoseOpenVINO::detect_r_box(

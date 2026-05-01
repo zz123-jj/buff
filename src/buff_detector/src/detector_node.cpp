@@ -29,6 +29,7 @@ public:
         this->declare_parameter<bool>("debug_mode", true);
         this->declare_parameter<bool>("image_reliable", true);
         this->declare_parameter<std::string>("buff_mode", "auto");
+        this->declare_parameter<double>("mode_judge_far_distance_px", 80.0);
 
 
         std::string model_path = this->get_parameter("model_path").as_string();
@@ -43,6 +44,8 @@ public:
         detector_config_.debug_mode = this->get_parameter("debug_mode").as_bool();
         image_reliable_ = this->get_parameter("image_reliable").as_bool();
         detector_config_.buff_mode = this->get_parameter("buff_mode").as_string();
+        detector_config_.mode_judge_far_distance_px =
+            static_cast<float>(this->get_parameter("mode_judge_far_distance_px").as_double());
 
 
         // 初始化检测器
