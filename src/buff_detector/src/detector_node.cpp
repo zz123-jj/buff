@@ -30,6 +30,10 @@ public:
         this->declare_parameter<bool>("image_reliable", true);
         this->declare_parameter<std::string>("buff_mode", "auto");
         this->declare_parameter<double>("mode_judge_far_distance_px", 80.0);
+        this->declare_parameter<bool>("yolo_target_lock_enabled", true);
+        this->declare_parameter<double>("yolo_lock_hold_sec", 2.5);
+        this->declare_parameter<double>("yolo_lock_min_confidence_ratio", 0.55);
+        this->declare_parameter<double>("yolo_lock_max_angle_error_rad", 0.60);
 
 
         std::string model_path = this->get_parameter("model_path").as_string();
@@ -46,6 +50,14 @@ public:
         detector_config_.buff_mode = this->get_parameter("buff_mode").as_string();
         detector_config_.mode_judge_far_distance_px =
             static_cast<float>(this->get_parameter("mode_judge_far_distance_px").as_double());
+        detector_config_.yolo_target_lock_enabled =
+            this->get_parameter("yolo_target_lock_enabled").as_bool();
+        detector_config_.yolo_lock_hold_sec =
+            static_cast<float>(this->get_parameter("yolo_lock_hold_sec").as_double());
+        detector_config_.yolo_lock_min_confidence_ratio =
+            static_cast<float>(this->get_parameter("yolo_lock_min_confidence_ratio").as_double());
+        detector_config_.yolo_lock_max_angle_error_rad =
+            static_cast<float>(this->get_parameter("yolo_lock_max_angle_error_rad").as_double());
 
 
         // 初始化检测器
@@ -107,7 +119,7 @@ private:
 
     void processFrame(cv::Mat frame, const rclcpp::Time& frame_stamp)
     {
-        if (!detector_->update(frame))
+        if (!detector_->update(frame, frame_stamp.seconds()))
         {
             auto target_msg = buff_interfaces::msg::BuffTarget();
             target_msg.header.stamp = frame_stamp;

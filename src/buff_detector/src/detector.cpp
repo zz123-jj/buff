@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <iostream>
+#include <limits>
 #include <unordered_map>
 #include <rclcpp/logger.hpp>
 #include <rclcpp/logging.hpp>
@@ -34,6 +36,24 @@ float candidateDistance(
     const BuffPoseCandidate& rhs)
 {
     return euclidean_distance(rectCenter(lhs.fan_box), rectCenter(rhs.fan_box));
+}
+
+float normalizeAngle(float angle)
+{
+    while (angle > static_cast<float>(M_PI))
+    {
+        angle -= static_cast<float>(2.0 * M_PI);
+    }
+    while (angle < static_cast<float>(-M_PI))
+    {
+        angle += static_cast<float>(2.0 * M_PI);
+    }
+    return angle;
+}
+
+float shortestAngleDiff(float angle, float reference)
+{
+    return normalizeAngle(angle - reference);
 }
 
 bool hasFarCandidate(
@@ -325,9 +345,143 @@ bool BuffDetector::init(cv::Mat& frame)
 
 bool BuffDetector::update(cv::Mat& frame)
 {
-    return detect_by_yolo(frame);
+    return update(frame, 0.0);
 }
-bool BuffDetector::detect_by_yolo(cv::Mat& frame)
+
+bool BuffDetector::update(cv::Mat& frame, double stamp_sec)
+{
+    return detect_by_yolo(frame, stamp_sec);
+}
+
+bool BuffDetector::select_stable_yolo_target(BuffPoseResult& output, double stamp_sec)
+{
+    if (!config_.yolo_target_lock_enabled ||
+        output.candidates.empty() ||
+        output.selected_index >= output.candidates.size())
+    {
+        return true;
+    }
+
+    const cv::Point2f r_center = rectCenter(output.r_box);
+    const float hold_sec = std::max(0.1f, config_.yolo_lock_hold_sec);
+    if (has_yolo_target_lock_ && stamp_sec > 0.0 && locked_yolo_stamp_sec_ > 0.0 &&
+        stamp_sec - locked_yolo_stamp_sec_ > static_cast<double>(hold_sec))
+    {
+        has_yolo_target_lock_ = false;
+        has_yolo_angle_velocity_ = false;
+    }
+
+    std::size_t selected_index = output.selected_index;
+    float selected_angle_error = 0.0f;
+    if (has_yolo_target_lock_)
+    {
+        float predicted_angle = locked_yolo_angle_;
+        const double dt = stamp_sec > 0.0 && locked_yolo_stamp_sec_ > 0.0
+            ? std::max(0.0, stamp_sec - locked_yolo_stamp_sec_)
+            : 0.0;
+        if (has_yolo_angle_velocity_ && dt > 0.0 && dt < static_cast<double>(hold_sec))
+        {
+            predicted_angle = normalizeAngle(
+                locked_yolo_angle_ + locked_yolo_angle_velocity_ * static_cast<float>(dt));
+        }
+
+        const float best_confidence = std::max_element(
+            output.candidates.begin(), output.candidates.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.confidence < rhs.confidence;
+            })->confidence;
+        const float min_confidence =
+            best_confidence * std::clamp(config_.yolo_lock_min_confidence_ratio, 0.0f, 1.0f);
+        const float reference_radius = std::max(locked_yolo_radius_, 30.0f);
+
+        float best_score = std::numeric_limits<float>::max();
+        float best_angle_error = std::numeric_limits<float>::max();
+        bool found_candidate = false;
+        for (std::size_t i = 0; i < output.candidates.size(); ++i)
+        {
+            const auto& candidate = output.candidates[i];
+            if (candidate.confidence < min_confidence)
+            {
+                continue;
+            }
+
+            const cv::Point2f center = rectCenter(candidate.fan_box);
+            const cv::Point2f radius_vec = center - r_center;
+            const float radius = static_cast<float>(cv::norm(radius_vec));
+            const float angle = std::atan2(radius_vec.y, radius_vec.x);
+            const float angle_error = std::abs(shortestAngleDiff(angle, predicted_angle));
+            const float angle_error_px = angle_error * reference_radius;
+            const float center_error = static_cast<float>(cv::norm(center - locked_yolo_center_));
+            const float radius_error = std::abs(radius - locked_yolo_radius_);
+            const float confidence_penalty = (best_confidence - candidate.confidence) * 80.0f;
+            const float score =
+                angle_error_px + 0.20f * center_error + 0.35f * radius_error + confidence_penalty;
+
+            if (score < best_score)
+            {
+                best_score = score;
+                best_angle_error = angle_error;
+                selected_index = i;
+                found_candidate = true;
+            }
+        }
+        if (!found_candidate)
+        {
+            return false;
+        }
+        selected_angle_error = best_angle_error;
+        if (selected_angle_error > std::max(0.1f, config_.yolo_lock_max_angle_error_rad))
+        {
+            static rclcpp::Clock throttle_clock;
+            RCLCPP_WARN_THROTTLE(
+                rclcpp::get_logger("BuffDetector"),
+                throttle_clock,
+                1000,
+                "Reject YOLO target switch: angle_error=%.3f rad limit=%.3f rad candidates=%zu",
+                selected_angle_error,
+                config_.yolo_lock_max_angle_error_rad,
+                output.candidates.size());
+            return false;
+        }
+    }
+
+    const auto& selected = output.candidates[selected_index];
+    const cv::Point2f selected_center = rectCenter(selected.fan_box);
+    const cv::Point2f selected_radius_vec = selected_center - r_center;
+    const float selected_radius = static_cast<float>(cv::norm(selected_radius_vec));
+    const float selected_angle = std::atan2(selected_radius_vec.y, selected_radius_vec.x);
+
+    if (has_yolo_target_lock_ && stamp_sec > 0.0 && locked_yolo_stamp_sec_ > 0.0)
+    {
+        const double dt = stamp_sec - locked_yolo_stamp_sec_;
+        if (dt > 1e-3 && dt < static_cast<double>(hold_sec))
+        {
+            const float measured_velocity =
+                shortestAngleDiff(selected_angle, locked_yolo_angle_) / static_cast<float>(dt);
+            if (std::isfinite(measured_velocity) && std::abs(measured_velocity) < 8.0f)
+            {
+                locked_yolo_angle_velocity_ = has_yolo_angle_velocity_
+                    ? 0.80f * locked_yolo_angle_velocity_ + 0.20f * measured_velocity
+                    : measured_velocity;
+                has_yolo_angle_velocity_ = true;
+            }
+        }
+    }
+
+    locked_yolo_center_ = selected_center;
+    locked_yolo_angle_ = selected_angle;
+    locked_yolo_radius_ = selected_radius;
+    locked_yolo_stamp_sec_ = stamp_sec;
+    has_yolo_target_lock_ = true;
+
+    output.selected_index = selected_index;
+    output.confidence = selected.confidence;
+    output.keypoints = selected.keypoints;
+    output.fan_box = selected.fan_box;
+    return true;
+}
+
+bool BuffDetector::detect_by_yolo(cv::Mat& frame, double stamp_sec)
 {
     // 初始化YOLOPose检测器
     static BuffYoloPoseOpenVINO yolo_detector;
@@ -399,6 +553,11 @@ bool BuffDetector::detect_by_yolo(cv::Mat& frame)
             buff_type_ == BuffType::big_buff ? "big" : "small",
             output.target_count,
             config_.mode_judge_far_distance_px);
+    }
+
+    if (!select_stable_yolo_target(output, stamp_sec))
+    {
+        return false;
     }
 
     target_blades_.push_back(FanBlade{

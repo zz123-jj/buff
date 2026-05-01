@@ -3,7 +3,7 @@ std_msgs/Header header
 # World-frame buff rotation model published by buff_estimator.
 bool valid
 int8 mode                    # 0=unknown, -1=small buff, 1=big buff
-int8 spin_direction          # 0=unknown, -1=negative angle, 1=positive angle
+int8 spin_direction          # configured direction: -1=negative angle, 1=positive angle
 
 bool has_observation             # true only when this message was corrected by a YOLO observation
 float32 seconds_since_observation

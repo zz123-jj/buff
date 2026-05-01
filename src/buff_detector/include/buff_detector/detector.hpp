@@ -4,6 +4,8 @@
 #include <string>
 #include <cstdint>
 
+struct BuffPoseResult;
+
 struct BuffDetectorConfig
 {
     std::string model_path = "src/buff_detector/model/yolo11_buff_int8.xml";
@@ -17,6 +19,10 @@ struct BuffDetectorConfig
     int dilate_kernel_size = 7;
     std::string buff_mode = "auto";
     float mode_judge_far_distance_px = 80.0f;
+    bool yolo_target_lock_enabled = true;
+    float yolo_lock_hold_sec = 2.5f;
+    float yolo_lock_min_confidence_ratio = 0.55f;
+    float yolo_lock_max_angle_error_rad = 0.45f;
 };
 
 float euclidean_distance(const cv::Point2f& p1, const cv::Point2f& p2); // 计算两点间的欧氏距离
@@ -131,12 +137,13 @@ private:
     BuffType buff_type_ = BuffType::small_buff;             // 能量机关类型
     BuffDetectorConfig config_;
 
-    bool detect_by_yolo(cv::Mat& frame);                            // 使用yolo模型获取扇叶和R标初始位置
+    bool detect_by_yolo(cv::Mat& frame, double stamp_sec = 0.0);     // 使用yolo模型获取扇叶和R标初始位置
     bool preprocess_image(cv::Mat& frame);                          // 获取预处理后的二值图
     bool update_R_box(cv::Mat& image, bool is_init = false);        // 获取R标框
     bool update_fan_blades(cv::Mat& image);                         // 检测扇叶位置
     void reset_spin_direction_state();                               // 重置方向状态机
     void update_spin_direction_by_target_id();                       // 根据目标扇叶ID更新方向
+    bool select_stable_yolo_target(BuffPoseResult& output, double stamp_sec);
     
 
 public:
@@ -145,6 +152,7 @@ public:
 
     bool init(cv::Mat& frame);                                               // 初始化检测器
     bool update(cv::Mat& frame);                                             // 更新检测结果
+    bool update(cv::Mat& frame, double stamp_sec);                           // 更新检测结果
     BBox get_first_target_blade_bbox() const                                  // 获取首个目标扇叶框
     {return target_blades_.empty() ? BBox() : target_blades_.front().box;}
     const std::vector<FanBlade>& get_target_fan_blades() const { return target_blades_; }
@@ -165,4 +173,11 @@ private:
     bool buff_type_locked_ = false;
     bool has_last_secondary_target_box_ = false;
     BBox last_secondary_target_box_;
+    bool has_yolo_target_lock_ = false;
+    bool has_yolo_angle_velocity_ = false;
+    cv::Point2f locked_yolo_center_;
+    float locked_yolo_angle_ = 0.0f;
+    float locked_yolo_radius_ = 0.0f;
+    float locked_yolo_angle_velocity_ = 0.0f;
+    double locked_yolo_stamp_sec_ = 0.0;
 };

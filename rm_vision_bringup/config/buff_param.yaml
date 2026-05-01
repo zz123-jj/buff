@@ -13,6 +13,10 @@ buff_detector_node:
       image_reliable: true
       buff_mode: auto
       mode_judge_far_distance_px: 80.0
+      yolo_target_lock_enabled: true
+      yolo_lock_hold_sec: 2.5
+      yolo_lock_min_confidence_ratio: 0.55
+      yolo_lock_max_angle_error_rad: 0.60
 
 
 
@@ -36,15 +40,21 @@ buff_estimator_node:
     pnp_normal_weight: 0.85
     known_circle_radius_m: 0.70
     model_publish_rate_hz: 60.0
+    rotation_direction: -1
     use_plane_constrained_points: true
     plane_normal_alpha: 0.08
     plane_offset_alpha: 0.05
     continuity_gate_enabled: true
     max_observation_jump_m: 0.55
     continuity_reset_sec: 0.35
+    max_angle_correction_rad: 0.60
+    phase_reacquire_timeout_sec: 0.75
+    angle_correction_alpha: 0.25
+    max_angle_correction_step_rad: 0.10
     velocity_median_window: 3
     velocity_sample_window_sec: 4.0
     max_velocity_sample_abs: 8.0
+    big_buff_default_speed_rad_s: 1.20
     fit_window_sec: 1.5
     fit_min_samples: 10
     fit_offset_sum: 2.090
