@@ -45,7 +45,6 @@ public:
         }
         detector_config_.model_path = model_path;
         detector_config_.openvino_device = this->get_parameter("openvino_device").as_string();
-        detector_config_.use_cuda = this->get_parameter("use_cuda").as_bool();
         detector_config_.confidence_threshold =
             static_cast<float>(this->get_parameter("confidence_threshold").as_double());
         detector_config_.iou_threshold =
@@ -139,6 +138,11 @@ private:
                 RCLCPP_INFO(this->get_logger(), "Detector initialized.");
             }else{
             RCLCPP_INFO(this->get_logger(),"Failed to initialize detector.");
+            auto msg = buff_interfaces::msg::BuffTarget();
+            set_defaultBuffTarget(msg);
+            msg.is_tracking = false;
+            msg.header.stamp = frame_stamp;
+            target_pub_->publish(msg);
             return;
         }}
 
@@ -149,6 +153,11 @@ private:
             {
                 is_tracking_ = false;
                 RCLCPP_WARN(this->get_logger(), "Detector lost target, re-initialization required.");
+                auto msg = buff_interfaces::msg::BuffTarget();
+                set_defaultBuffTarget(msg);
+                msg.is_tracking = false;
+                msg.header.stamp = frame_stamp;
+                target_pub_->publish(msg);
                 return;
             }
 

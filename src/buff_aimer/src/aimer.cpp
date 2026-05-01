@@ -49,18 +49,19 @@ public:
 
         RCLCPP_INFO(this->get_logger(),
             "BuffAimer started. bullet=%.2f m/s, radius=%.2f m", bullet_speed_, physical_radius_);
-
-        // ---------- 订阅与发布 ----------
+        //订阅解算后信息
         aiming_sub_ = this->create_subscription<buff_interfaces::msg::BuffAimingData>(
             "/buff/aiming_data", rclcpp::SensorDataQoS(),
-            [this](const buff_interfaces::msg::BuffAimingData::SharedPtr msg) {
+            [this](const buff_interfaces::msg::BuffAimingData::SharedPtr msg) 
+            {
                 this->aimingCallback(msg);
             });
-
+        //发布自瞄结果
         autoaim_pub_ = this->create_publisher<gary_msgs::msg::AutoAIM>(
             "/autoaim/target", rclcpp::SensorDataQoS());
-
-        if (debug_) {
+        //发布调试信息
+        if (debug_) 
+        {
             debug_pub_ = this->create_publisher<gary_msgs::msg::AutoAimDebug>(
                 "/autoaim/debug", rclcpp::SensorDataQoS());
         }
@@ -72,11 +73,14 @@ private:
             return;
         }
         // 计算消息延迟
-        rclcpp::Time msg_stamp = msg->header.stamp;
-        double msg_latency = (this->now() - msg_stamp).seconds();
-        if (msg_latency < 0.0) msg_latency = 0.0;
-
-         // 初始飞行时间估计（基于当前目标位置和子弹速度）
+        rclcpp::Time sensor_stamp = msg->header.stamp;
+        double msg_latency = (this->now() - sensor_stamp).seconds();
+        if (msg_latency < 0.0) {
+            msg_latency = 0.0;
+            RCLCPP_WARN(this->get_logger(), "Head timestamp error Sensor time: %f, Current time: %f",
+                sensor_stamp.seconds(), this->now().seconds());
+        }
+        // 初始飞行时间估计（基于当前目标位置和子弹速度）
         double t_fly = std::max(std::hypot( msg->target_x_3d, msg->target_y_3d ) / bullet_speed_, 0.05);
 
         // ---------- 弹道迭代 ----------
@@ -87,17 +91,18 @@ private:
 
         for (int iter = 0; iter < max_iteration_; ++iter) {
         // 1. 利用当前的 t_fly 计算预测延迟
-        double predict_delay = msg_latency + t_fly + shoot_delay_+0.04;
+        double total_delay = msg_latency + t_fly + shoot_delay_+ 0.04;
 
         // 2. 预测目标在那时在哪
-        geometry_msgs::msg::Point pred_odom = predictTargetPosition(*msg, predict_delay);
-
+        geometry_msgs::msg::Point pred_odom = predictTargetPosition(*msg, total_delay);
+        pred_point_ = pred_odom; // 供外部查询使用
+        
         // 3. 计算弹道
         double distance_xy = std::hypot(pred_odom.x, pred_odom.y);
         BallisticResult res = solveBallistic(distance_xy, pred_odom.z);
 
         // 4. 更新最终结果
-        final_pitch = -res.pitch;
+        final_pitch = -res.pitch;//ros坐标系下仰角为负
         final_yaw = std::atan2(pred_odom.y, pred_odom.x);
         distance_3d = std::hypot(distance_xy, pred_odom.z);
 
@@ -105,13 +110,13 @@ private:
         if (std::abs(t_fly - res.t_fly) < converge_thresh_) {
             converged = true;
             break;
-        }
+            }
         t_fly = res.t_fly;
-    }
+        }
         if (!converged) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                 "Ballistic iteration did not converge, using last result.");
-        }
+            }
 
         const rclcpp::Time publish_time = this->now();
 
@@ -122,10 +127,6 @@ private:
         autoaim_msg->target_distance = static_cast<float>(distance_3d);
         autoaim_msg->header.stamp = publish_time;
         autoaim_msg->header.frame_id = target_frame_;
-        autoaim_msg->target_id = gary_msgs::msg::AutoAIM::TARGET_ID6_OUTPOST;
-        autoaim_msg->vision_mode = msg->is_bigbuff == 1
-            ? gary_msgs::msg::AutoAIM::VISION_MODE_BIG
-            : gary_msgs::msg::AutoAIM::VISION_MODE_SMALL;
         autoaim_msg->shoot_command = gary_msgs::msg::AutoAIM::ALLOW_SHOOT;
         autoaim_msg->shoot_mode = gary_msgs::msg::AutoAIM::SHOOT_MODE_AUTO;
         autoaim_pub_->publish(std::move(autoaim_msg));
@@ -133,13 +134,13 @@ private:
         // 调试信息
         if (debug_) {
             auto debug_msg = gary_msgs::msg::AutoAimDebug();
-            debug_msg.plan_yaw   = final_yaw;
-            debug_msg.plan_pitch = final_pitch;
+            //只发预测点
+            debug_msg.pred_point = pred_point_;
             debug_pub_->publish(debug_msg);
-        }
+            }
     }
 
-
+    //计算目标未来位置
     geometry_msgs::msg::Point predictTargetPosition(
         const buff_interfaces::msg::BuffAimingData& msg, double delta_t) {
 
@@ -157,6 +158,7 @@ private:
                 double t0 = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 - msg.fit_start_time_sec;
                 double t_pred = delta_t + msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 - msg.fit_start_time_sec;
                 // 角速度拟合的是幅值，方向由 spin_direction 统一决定。
+                //计算角度差
                 const double speed_integral = B * delta_t
                     - (A / omega) * (std::cos(omega * t_pred + phi) - std::cos(omega * t0 + phi));
                 delta_theta = msg.spin_direction * speed_integral;
@@ -194,8 +196,8 @@ private:
             Eigen::Vector3d radius_vector = current_target - r_center;
 
             // 5. 构造 3D 旋转器 (基于右手螺旋定则)
-            // delta_theta 已按 spin_direction 带符号，旋转方向遵循右手定则。
-            Eigen::AngleAxisd rotation(delta_theta, normal_axis);
+            // delta_theta 已按 spin_direction 带符号，旋转方向遵循右手定则（顺时针+逆时针-）
+            Eigen::AngleAxisd rotation(msg.spin_direction * delta_theta, normal_axis);
 
             // 6. 对半径向量进行 3D 旋转
             Eigen::Vector3d pred_radius_vector = rotation * radius_vector;
@@ -203,12 +205,13 @@ private:
             // 7. 计算最终的 3D 预测坐标 = R心坐标 + 旋转后的半径向量
             Eigen::Vector3d pred_target = r_center + pred_radius_vector;
 
-            geometry_msgs::msg::Point p;
-            p.x = pred_target.x();
-            p.y = pred_target.y();
-            p.z = pred_target.z();
-                    return p;
-                }
+            geometry_msgs::msg::Point predicted_point;
+            predicted_point.x = pred_target.x();
+            predicted_point.y = pred_target.y();
+            predicted_point.z = pred_target.z();
+                
+            return predicted_point;
+    }
 
     // ---------- 弹道解算（考虑重力与空气阻力） ----------
     BallisticResult solveBallistic(double distance_xy, double distance_z) {
@@ -258,20 +261,18 @@ private:
         return {pitch, t_fly};
     }
 
-    // ---------- 成员变量 ----------
-
-
     rclcpp::Subscription<buff_interfaces::msg::BuffAimingData>::SharedPtr aiming_sub_;
     rclcpp::Publisher<gary_msgs::msg::AutoAIM>::SharedPtr autoaim_pub_;
     rclcpp::Publisher<gary_msgs::msg::AutoAimDebug>::SharedPtr debug_pub_;
-
+    //debug用
+    geometry_msgs::msg::Point pred_point_;
+    
     std::string target_frame_;
     double bullet_speed_, shoot_delay_, physical_radius_;
     double gravity_, air_k_, converge_thresh_, sim_dt_, stop_error_;
     int max_iteration_;
     bool debug_;
 };
-
 
 // 组件注册
 #include "rclcpp_components/register_node_macro.hpp"

@@ -20,69 +20,55 @@ class BuffEstimatorNode : public rclcpp::Node
 public:
     explicit BuffEstimatorNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
     : Node("buff_estimator_node", options)
-    {
-        
-        predictor_ = std::make_unique<Big_Buff_Predictor>();
-        angle_observer_ = std::make_unique<angleObserver>(clockMode::unknown);
-
-        this->declare_parameter<std::string>("target_frame", "odom");
-        this->declare_parameter<std::string>("camera_frame", "camera_optical_frame");
-        this->declare_parameter<bool>("debug_mode", true);
-        this->declare_parameter<double>("physical_arm_length", 0.75);
-        this->declare_parameter<std::string>("debug_csv_path", "buff_estimator_debug.csv");
-        this->declare_parameter<int>("velocity_median_window", 3);
-        this->declare_parameter<int>("radius_mean_window", 15);
-        this->declare_parameter<double>("fit_window_sec", 1.5);
-        this->declare_parameter<int>("fit_min_samples", 10);
-        this->declare_parameter<double>("fit_offset_sum", 2.090);
+    {   
+        this->declare_parameter<bool>               ("debug_mode", false);
+        this->declare_parameter<std::string>        ("debug_csv_path", "buff_estimator_debug.csv");
+        this->declare_parameter<std::string>        ("target_frame", "odom");
+        this->declare_parameter<std::string>        ("camera_frame", "camera_optical_frame");
+        this->declare_parameter<double>             ("physical_arm_length", 0.75);
+        this->declare_parameter<int>                ("velocity_median_window", 3);
+        this->declare_parameter<int>                ("radius_mean_window", 15);
+        this->declare_parameter<double>             ("fit_window_sec", 1.5);
+        this->declare_parameter<int>                ("fit_min_samples", 15);
+        this->declare_parameter<double>             ("fit_offset_sum", 2.090);
         this->declare_parameter<std::vector<double>>("fit_a_range", {0.780, 1.045});
         this->declare_parameter<std::vector<double>>("fit_omega_range", {1.884, 2.000});
-        this->declare_parameter<std::vector<double>>("fit_phi_range", {-M_PI, M_PI});
-        target_frame_ = this->get_parameter("target_frame").as_string();
-        camera_frame_ = this->get_parameter("camera_frame").as_string();
-        debug_mode_ = this->get_parameter("debug_mode").as_bool();
-        physical_arm_length_     = this->get_parameter("physical_arm_length").as_double();
-        debug_csv_path_ = this->get_parameter("debug_csv_path").as_string();
-        velocity_median_window_ = this->get_parameter("velocity_median_window").as_int();
-        radius_mean_window_ = this->get_parameter("radius_mean_window").as_int();
-        auto fit_window_sec = this->get_parameter("fit_window_sec").as_double();
-        auto fit_min_samples = this->get_parameter("fit_min_samples").as_int();
-        auto fit_offset_sum = this->get_parameter("fit_offset_sum").as_double();
-        auto fit_a_range = this->get_parameter("fit_a_range").as_double_array();
-        auto fit_omega_range = this->get_parameter("fit_omega_range").as_double_array();
-        auto fit_phi_range = this->get_parameter("fit_phi_range").as_double_array();
-
-        velocity_median_filter_ =
-            std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
-        radius_mean_filter_ =
-            std::make_unique<MovAvg>(std::max(1, radius_mean_window_));
-        // 配置预测器拟合参数
-        predictor_->set_fit_config(
-            fit_offset_sum,
-            fit_window_sec,
-            fit_min_samples,
-            fit_a_range[0],
-            fit_a_range[1],
-            fit_omega_range[0],
-            fit_omega_range[1],
-            fit_phi_range[0],
-            fit_phi_range[1]);
+        
+        target_frame_ = this->get_parameter             ("target_frame").as_string();
+        camera_frame_ = this->get_parameter             ("camera_frame").as_string();
+        debug_mode_ = this->get_parameter               ("debug_mode").as_bool();
+        physical_arm_length_= this->get_parameter       ("physical_arm_length").as_double();
+        debug_csv_path_ = this->get_parameter           ("debug_csv_path").as_string();
+        velocity_median_window_ = this->get_parameter   ("velocity_median_window").as_int();
+        radius_mean_window_ = this->get_parameter       ("radius_mean_window").as_int();
+        auto fit_window_sec = this->get_parameter       ("fit_window_sec").as_double();
+        auto fit_min_samples = this->get_parameter      ("fit_min_samples").as_int();
+        auto fit_offset_sum = this->get_parameter       ("fit_offset_sum").as_double();
+        auto fit_a_range = this->get_parameter          ("fit_a_range").as_double_array();
+        auto fit_omega_range = this->get_parameter      ("fit_omega_range").as_double_array();
+             
+        predictor_ =                std::make_unique<Big_Buff_Predictor>();
+         // 配置预测器拟合参数
+        predictor_->set_fit_config(fit_offset_sum,fit_window_sec,fit_min_samples,fit_a_range[0],
+            fit_a_range[1],fit_omega_range[0],fit_omega_range[1]);
+        
+        angle_observer_ =           std::make_unique<angleObserver>(clockMode::unknown);
+        velocity_median_filter_ =   std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
+        radius_mean_filter_ =       std::make_unique<MovAvg>(std::max(1, radius_mean_window_));
+       
         cam_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
-        "/camera_info", rclcpp::SensorDataQoS(),
-        [this](const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
+            "/camera_info", rclcpp::SensorDataQoS(),
+            [this](const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
             // 从 CameraInfo 的 K 矩阵中提取内参：fx = K[0], fy = K[4], cx = K[2], cy = K[5]
-            CoordinateSolver::CameraIntrinsics cam_intri = {
-                msg->k[0], msg->k[4], msg->k[2], msg->k[5]
+            CoordinateSolver::CameraIntrinsics cam_intri = {msg->k[0], msg->k[4], msg->k[2], msg->k[5]
             };
-            
             // 重新初始化坐标解算器
             coord_solver_ = std::make_unique<CoordinateSolver>(cam_intri, physical_arm_length_);
             has_cam_info_ = true;
-            
             // 拿到内参后可以取消订阅以节省开销（如果内参不会改变）
-             cam_info_sub_.reset(); 
-        });
-    
+            cam_info_sub_.reset(); 
+            });
+        //订阅来自相机坐标系的信息
         target_sub_ = this->create_subscription<buff_interfaces::msg::BuffTarget>(
             "/buff/target", 10,
             [this](const buff_interfaces::msg::BuffTarget::SharedPtr msg) { targetCallback(msg); });
@@ -91,14 +77,12 @@ public:
             "/buff/aiming_data", 10);
 
         // 接受tf
-        tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+        tf_buffer_ =   std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
         
         //debug mode记录csv
         if (debug_mode_) {
-        debug_csv_.open(debug_csv_path_);
-
-        }
+        debug_csv_.open(debug_csv_path_);}
 
     }
     ~BuffEstimatorNode()
@@ -108,55 +92,14 @@ public:
         }
     }
 
-  
-
 private:
-
- bool transformPointToTarget(
-        const geometry_msgs::msg::PointStamped& input,
-        const builtin_interfaces::msg::Time& stamp,
-        geometry_msgs::msg::PointStamped& output)
-    {
-        if (input.header.frame_id == target_frame_) {
-            output = input;
-            return true;
-        }
-
-        try
-        {
-            auto tf_stamped = tf_buffer_->lookupTransform(
-                target_frame_,
-                input.header.frame_id,
-                stamp,
-                std::chrono::milliseconds(10)
-            );
-            tf2::doTransform(input, output, tf_stamped);
-            return true;
-        }
-        catch (const tf2::TransformException &ex)
-        {
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                1000,
-                "TF Error(target=%s, source=%s): %s",
-                target_frame_.c_str(),
-                input.header.frame_id.c_str(),
-                ex.what()
-            );
-            return false;
-        }
-    }
-
-    void targetCallback(const buff_interfaces::msg::BuffTarget::SharedPtr msg)
-    {   
+    void targetCallback(const buff_interfaces::msg::BuffTarget::SharedPtr msg){   
         if (!has_cam_info_ ) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "Waiting for CameraInfo to initialize coordinate solver...");
             return;
         }
         buff_interfaces::msg::BuffAimingData aiming_msg;
         aiming_msg.header = msg->header;
-        
         aiming_msg.header.frame_id = target_frame_;
         bool is_tracking = msg->is_tracking;
         aiming_msg.is_tracking = is_tracking;
@@ -165,10 +108,8 @@ private:
             setDefaultAimingMsg(aiming_msg);
             predictor_->reset();
             angle_observer_->reset();
-            velocity_median_filter_ =
-            std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
-            radius_mean_filter_ =
-            std::make_unique<MovAvg>(std::max(1, radius_mean_window_));
+            velocity_median_filter_ =   std::make_unique<MedianFilter>(std::max(1, velocity_median_window_));
+            radius_mean_filter_ =       std::make_unique<MovAvg>(std::max(1, radius_mean_window_));
             isFirst_frame_ = true;
             last_time_since_start_ = 0.0;
             time_since_start_ = 0.0;
@@ -189,16 +130,15 @@ private:
             r_cam.header.stamp = msg->header.stamp;
             r_cam.header.frame_id = camera_frame_;
             r_cam.point = coord_solver_->pixelToCamera(msg->r_center_x, msg->r_center_y, depth);
-            //fuck2
             aiming_msg.r_cam_x_3d = static_cast<float>(r_cam.point.x);
             aiming_msg.r_cam_y_3d = static_cast<float>(r_cam.point.y);
             aiming_msg.r_cam_z_3d = static_cast<float>(r_cam.point.z);
             aiming_msg.depth = static_cast<float>(depth);
+            
             geometry_msgs::msg::PointStamped target_cam;
             target_cam.header.stamp = msg->header.stamp;
             target_cam.header.frame_id = camera_frame_;
-            target_cam.point =
-                coord_solver_->pixelToCamera(msg->target_center_x, msg->target_center_y, depth);
+            target_cam.point = coord_solver_->pixelToCamera(msg->target_center_x, msg->target_center_y, depth);
 
             geometry_msgs::msg::PointStamped target_center;
             geometry_msgs::msg::PointStamped r_center;
@@ -242,7 +182,6 @@ private:
                 filtered_radius);
         }
 
-        //不在跟踪时重置状态并发布默认数据
         if (msg->is_bigbuff == 1) {
             clockMode direction_mode = clockMode::unknown;
             if (msg->spin_direction == -1) {
@@ -329,6 +268,43 @@ private:
         
         aiming_pub_->publish(aiming_msg);
     }
+    bool transformPointToTarget(
+        const geometry_msgs::msg::PointStamped& input,
+        const builtin_interfaces::msg::Time& stamp,
+        geometry_msgs::msg::PointStamped& output)
+    {
+        if (input.header.frame_id == target_frame_) {
+            output = input;
+            return true;
+        }
+
+        try
+        {
+            auto tf_stamped = tf_buffer_->lookupTransform(
+                target_frame_,
+                input.header.frame_id,
+                stamp,
+                std::chrono::milliseconds(10)
+            );
+            tf2::doTransform(input, output, tf_stamped);
+            return true;
+        }
+        catch (const tf2::TransformException &ex)
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "TF Error(target=%s, source=%s): %s",
+                target_frame_.c_str(),
+                input.header.frame_id.c_str(),
+                ex.what()
+            );
+            return false;
+        }
+    }
+
+    
 
     void setDefaultAimingMsg(buff_interfaces::msg::BuffAimingData& aiming_msg)
     {

@@ -1,14 +1,9 @@
-# ======================================================================
-# 能量机关自瞄系统参数配置文件
-# 用于 buff_detector、buff_estimator、buff_aimer 三个节点
-# ======================================================================
 
 # -------------------- 检测节点 (buff_detector) --------------------
 buff_detector_node:
   ros__parameters:
       model_path: model/yolo11_buff_int8.xml
       openvino_device: GPU
-      use_cuda: false
       confidence_threshold: 0.70
       iou_threshold: 0.5
       debug_mode: true
@@ -37,10 +32,8 @@ buff_estimator_node:
     fit_window_sec: 1.5
     fit_min_samples: 10
     fit_offset_sum: 2.090
-    
     fit_a_range: [0.780, 1.045]
     fit_omega_range: [1.884, 2.000]
-    fit_phi_range: [-3.141592653589793, 3.141592653589793]
 
 
 

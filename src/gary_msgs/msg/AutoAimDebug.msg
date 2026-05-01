@@ -10,3 +10,4 @@ float32 yaw_diff
 float32 pitch_diff
 float32 yaw_limit_1
 float32 yaw_limit_2
+geometry_msgs/Point pred_point

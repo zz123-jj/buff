@@ -8,7 +8,6 @@ struct BuffDetectorConfig
 {
     std::string model_path = "src/buff_detector/model/yolo11_buff_int8.xml";
     std::string openvino_device = "GPU";
-    bool use_cuda = false;
     float confidence_threshold = 0.5f;
     float iou_threshold = 0.5f;
     bool debug_mode = true;

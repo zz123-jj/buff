@@ -9,25 +9,23 @@
 #include "dataProcessor.hpp"
 using namespace Eigen;
 
-//拟合开始检测器
-//根据用户设定的时间阈值和时间戳来判断是否可以开始拟合
 class Big_Buff_Predictor {
     public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
         std::vector<std::pair<double,float>> time_w_pairs_;  //时间角速度对 
-    private:
-    bool fit_attempted_ = false;//是否已经尝试过拟合
-    bool fit_ready_ = false;//是否拟合完成并准备好预测结果
-    Vector4f velocity_fit_params_ = Vector4f::Zero();  // [A, omega, phi, b]
-    double fit_offset_sum_ = 2.090;
-    double fit_window_sec_ = 1.5;
-    int fit_min_samples_ = 10;
-    double a_lower_ = 0.780;
-    double a_upper_ = 1.045;
-    double omega_lower_ = 1.884;
-    double omega_upper_ = 2.000;
-    double phi_lower_ = -M_PI;
-    double phi_upper_ = M_PI;
+        private:
+        bool fit_attempted_ = false;//是否已经尝试过拟合
+        bool fit_ready_ = false;//是否拟合完成并准备好预测结果
+        Vector4f velocity_fit_params_ = Vector4f::Zero();  // [A, omega, phi, b]
+        double fit_offset_sum_ = 2.090;
+        double fit_window_sec_ = 1.5;
+        int fit_min_samples_ = 10;
+        double a_lower_ = 0.780;
+        double a_upper_ = 1.045;
+        double omega_lower_ = 1.884;
+        double omega_upper_ = 2.000;
+        double phi_lower_ = -M_PI;
+        double phi_upper_ = M_PI;
 
     public:
     Big_Buff_Predictor();
@@ -42,9 +40,7 @@ class Big_Buff_Predictor {
         double a_lower,
         double a_upper,
         double omega_lower,
-        double omega_upper,
-        double phi_lower,
-        double phi_upper)
+        double omega_upper)
     {
         fit_offset_sum_ = fit_offset_sum;
         fit_window_sec_ = fit_window_sec;
@@ -53,8 +49,6 @@ class Big_Buff_Predictor {
         a_upper_ = a_upper;
         omega_lower_ = omega_lower;
         omega_upper_ = omega_upper;
-        phi_lower_ = phi_lower;
-        phi_upper_ = phi_upper;
     }
     Vector4f get_velocity_fit_params() const { return velocity_fit_params_; }
     float get_fit_buffer_duration_sec() const
