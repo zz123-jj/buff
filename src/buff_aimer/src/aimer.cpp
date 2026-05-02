@@ -12,6 +12,8 @@
 #include "buff_interfaces/msg/buff_aiming_data.hpp"
 #include "gary_msgs/msg/auto_aim.hpp"
 #include "gary_msgs/msg/auto_aim_debug.hpp"
+#include "visualization_msgs/msg/marker.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
 
 struct BallisticResult {
     double pitch;   // 枪口绝对仰角 (rad)
@@ -32,6 +34,8 @@ public:
         this->declare_parameter<double>("ballistic.converge_thresh", 0.002);
         this->declare_parameter<double>("ballistic.sim_dt", 0.005);
         this->declare_parameter<bool>("aiming.debug", true);
+        this->declare_parameter<double>("aiming.max_yaw_change_speed", 0.5);
+        this->declare_parameter<double>("aiming.max_pitch_change_speed", 0.5);
         this->declare_parameter<int>("max_iteration", 5);
         this->declare_parameter<double>("stop_error", 0.001);
 
@@ -44,6 +48,8 @@ public:
         converge_thresh_ = this->get_parameter("ballistic.converge_thresh").as_double();
         sim_dt_          = this->get_parameter("ballistic.sim_dt").as_double();
         debug_           = this->get_parameter("aiming.debug").as_bool();
+        max_yaw_change_speed_ = this->get_parameter("aiming.max_yaw_change_speed").as_double();
+        max_pitch_change_speed_ = this->get_parameter("aiming.max_pitch_change_speed").as_double();
         max_iteration_   = this->get_parameter("max_iteration").as_int();
         stop_error_      = this->get_parameter("stop_error").as_double();
 
@@ -65,13 +71,25 @@ public:
             debug_pub_ = this->create_publisher<gary_msgs::msg::AutoAimDebug>(
                 "/autoaim/debug", rclcpp::SensorDataQoS());
         }
+        marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "/buff/aiming_markers", rclcpp::SensorDataQoS());
     }
 
 private:
     void aimingCallback(const buff_interfaces::msg::BuffAimingData::SharedPtr msg) {
         if (!msg->is_tracking) {
+            publishDeleteTargetMarkers(this->now());
             return;
         }
+
+        if (!isValidTargetPoint(msg->target_x_3d, msg->target_y_3d, msg->target_z_3d)) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                "Invalid aiming target point, skip publish. target=(%.3f, %.3f, %.3f)",
+                msg->target_x_3d, msg->target_y_3d, msg->target_z_3d);
+            publishDeleteTargetMarkers(this->now());
+            return;
+        }
+
         // 计算消息延迟
         rclcpp::Time sensor_stamp = msg->header.stamp;
         double msg_latency = (this->now() - sensor_stamp).seconds();
@@ -80,56 +98,60 @@ private:
             RCLCPP_WARN(this->get_logger(), "Head timestamp error Sensor time: %f, Current time: %f",
                 sensor_stamp.seconds(), this->now().seconds());
         }
-        // 初始飞行时间估计（基于当前目标位置和子弹速度）
-        double t_fly = std::max(std::hypot( msg->target_x_3d, msg->target_y_3d ) / bullet_speed_, 0.05);
+        geometry_msgs::msg::Point current_point;
+        current_point.x = msg->target_x_3d;
+        current_point.y = msg->target_y_3d;
+        current_point.z = msg->target_z_3d;
 
-        // ---------- 弹道迭代 ----------
-        double final_yaw = 0.0;
-        double final_pitch = 0.0;
-        double distance_3d = 0.0;
+        const double current_distance_xy = std::hypot(current_point.x, current_point.y);
+        double distance_3d = std::hypot(current_distance_xy, current_point.z);
+        double t_fly = distance_3d / std::max(bullet_speed_, 1e-3);
+
+        BallisticResult ballistic_res = solveBallistic(current_distance_xy, current_point.z);
+        pred_point_ = current_point;
         bool converged = false;
 
-        for (int iter = 0; iter < max_iteration_; ++iter) {
-        // 1. 利用当前的 t_fly 计算预测延迟
-        double total_delay = msg_latency + t_fly + shoot_delay_+ 0.04;
+        for (int iter = 0; iter < 4; ++iter) {
+            // 1. 计算火控用的预测总时间（不加控制延迟）
+            double predict_delay = t_fly + msg_latency;
 
-        // 2. 预测目标在那时在哪
-        geometry_msgs::msg::Point pred_odom = predictTargetPosition(*msg, total_delay);
-        pred_point_ = pred_odom; // 供外部查询使用
-        
-        // 3. 计算弹道
-        double distance_xy = std::hypot(pred_odom.x, pred_odom.y);
-        BallisticResult res = solveBallistic(distance_xy, pred_odom.z);
+            // 2. 预测目标在那时在哪
+            geometry_msgs::msg::Point pred_odom = predictTargetPosition(*msg, predict_delay);
+            pred_point_ = pred_odom; // 供外部查询使用
+            
+            // 3. 对着未来位置重新解算空气阻力弹道
+            double distance_xy = std::hypot(pred_odom.x, pred_odom.y);
+            ballistic_res = solveBallistic(distance_xy, pred_odom.z);
+            distance_3d = std::hypot(distance_xy, pred_odom.z);
 
-        // 4. 更新最终结果
-        final_pitch = -res.pitch;//ros坐标系下仰角为负
-        final_yaw = std::atan2(pred_odom.y, pred_odom.x);
-        distance_3d = std::hypot(distance_xy, pred_odom.z);
-
-        // 5. 检查是否收敛
-        if (std::abs(t_fly - res.t_fly) < converge_thresh_) {
-            converged = true;
-            break;
+            // 4. 检查 t_fly 是否收敛
+            if (std::abs(t_fly - ballistic_res.t_fly) < 0.002) {
+                converged = true;
+                break;
             }
-        t_fly = res.t_fly;
+            t_fly = ballistic_res.t_fly;
         }
         if (!converged) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                 "Ballistic iteration did not converge, using last result.");
-            }
+        }
 
         const rclcpp::Time publish_time = this->now();
+        double publish_yaw = std::atan2(pred_point_.y, pred_point_.x);
+        double publish_pitch = ballistic_res.pitch;
+        limitOutputAngles(publish_yaw, publish_pitch, publish_time);
 
         // 发布自瞄指令
         auto autoaim_msg = std::make_unique<gary_msgs::msg::AutoAIM>();
-        autoaim_msg->yaw   = static_cast<float>(final_yaw);
-        autoaim_msg->pitch = static_cast<float>(final_pitch);
+        autoaim_msg->yaw   = static_cast<float>(publish_yaw);
+        autoaim_msg->pitch = -static_cast<float>(publish_pitch);
         autoaim_msg->target_distance = static_cast<float>(distance_3d);
         autoaim_msg->header.stamp = publish_time;
         autoaim_msg->header.frame_id = target_frame_;
         autoaim_msg->shoot_command = gary_msgs::msg::AutoAIM::ALLOW_SHOOT;
         autoaim_msg->shoot_mode = gary_msgs::msg::AutoAIM::SHOOT_MODE_AUTO;
         autoaim_pub_->publish(std::move(autoaim_msg));
+        publishTargetMarkers(*msg, pred_point_, publish_time);
 
         // 调试信息
         if (debug_) {
@@ -138,6 +160,143 @@ private:
             debug_msg.pred_point = pred_point_;
             debug_pub_->publish(debug_msg);
             }
+        }
+
+    visualization_msgs::msg::Marker makePointMarker(
+        const std::string& ns,
+        int id,
+        const rclcpp::Time& stamp,
+        const geometry_msgs::msg::Point& point,
+        float r,
+        float g,
+        float b,
+        double scale) const
+    {
+        auto marker = visualization_msgs::msg::Marker();
+        marker.header.frame_id = target_frame_;
+        marker.header.stamp = stamp;
+        marker.ns = ns;
+        marker.id = id;
+        marker.type = visualization_msgs::msg::Marker::SPHERE;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.pose.position = point;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = scale;
+        marker.scale.y = scale;
+        marker.scale.z = scale;
+        marker.color.r = r;
+        marker.color.g = g;
+        marker.color.b = b;
+        marker.color.a = 0.9f;
+        marker.lifetime.sec = 0;
+        marker.lifetime.nanosec = 250000000;
+        return marker;
+    }
+
+    void publishTargetMarkers(
+        const buff_interfaces::msg::BuffAimingData& msg,
+        const geometry_msgs::msg::Point& pred_point,
+        const rclcpp::Time& stamp) const
+    {
+        geometry_msgs::msg::Point current_point;
+        current_point.x = msg.target_x_3d;
+        current_point.y = msg.target_y_3d;
+        current_point.z = msg.target_z_3d;
+
+        auto markers = visualization_msgs::msg::MarkerArray();
+        markers.markers.emplace_back(makePointMarker(
+            "buff_current_target", 0, stamp, current_point, 0.1f, 0.9f, 0.2f, 0.08));
+        markers.markers.emplace_back(makePointMarker(
+            "buff_predicted_target", 1, stamp, pred_point, 1.0f, 0.25f, 0.05f, 0.10));
+
+        auto line = visualization_msgs::msg::Marker();
+        line.header.frame_id = target_frame_;
+        line.header.stamp = stamp;
+        line.ns = "buff_prediction_delta";
+        line.id = 2;
+        line.type = visualization_msgs::msg::Marker::LINE_STRIP;
+        line.action = visualization_msgs::msg::Marker::ADD;
+        line.pose.orientation.w = 1.0;
+        line.scale.x = 0.02;
+        line.color.r = 0.2f;
+        line.color.g = 0.7f;
+        line.color.b = 1.0f;
+        line.color.a = 0.7f;
+        line.points.push_back(current_point);
+        line.points.push_back(pred_point);
+        line.lifetime.sec = 0;
+        line.lifetime.nanosec = 250000000;
+        markers.markers.emplace_back(line);
+
+        marker_pub_->publish(markers);
+    }
+
+    void publishDeleteTargetMarkers(const rclcpp::Time& stamp) const
+    {
+        if (!marker_pub_) {
+            return;
+        }
+
+        auto markers = visualization_msgs::msg::MarkerArray();
+        auto marker = visualization_msgs::msg::Marker();
+        marker.header.frame_id = target_frame_;
+        marker.header.stamp = stamp;
+        marker.action = visualization_msgs::msg::Marker::DELETEALL;
+        markers.markers.emplace_back(marker);
+        marker_pub_->publish(markers);
+    }
+
+    static bool isValidTargetPoint(double x, double y, double z) {
+        constexpr double kMinDistance = 1e-6;
+        return std::isfinite(x) && std::isfinite(y) && std::isfinite(z)
+            && std::hypot(x, y) > kMinDistance;
+    }
+
+    static double normalizeAngle(double angle) {
+        while (angle > M_PI) {
+            angle -= 2.0 * M_PI;
+        }
+        while (angle < -M_PI) {
+            angle += 2.0 * M_PI;
+        }
+        return angle;
+    }
+
+    static double limitLinearStep(double current, double last, double max_speed, double dt) {
+        if (max_speed <= 0.0 || dt <= 0.0) {
+            return current;
+        }
+        const double max_step = max_speed * dt;
+        const double step = current - last;
+        if (step > max_step) {
+            return last + max_step;
+        }
+        if (step < -max_step) {
+            return last - max_step;
+        }
+        return current;
+    }
+
+    void limitOutputAngles(double& yaw, double& pitch, const rclcpp::Time& now) {
+        if (has_last_output_) {
+            const double dt = (now - last_output_time_).seconds();
+            if (dt > 0.0 && max_yaw_change_speed_ > 0.0) {
+                const double yaw_step = normalizeAngle(yaw - last_output_yaw_);
+                const double max_yaw_step = max_yaw_change_speed_ * dt;
+                if (yaw_step > max_yaw_step) {
+                    yaw = normalizeAngle(last_output_yaw_ + max_yaw_step);
+                } else if (yaw_step < -max_yaw_step) {
+                    yaw = normalizeAngle(last_output_yaw_ - max_yaw_step);
+                }
+            }
+
+            pitch = limitLinearStep(pitch, last_output_pitch_, max_pitch_change_speed_, dt);
+        }
+
+        last_output_time_ = now;
+        last_output_yaw_ = yaw;
+        last_output_pitch_ = pitch;
+        has_last_output_ = true;
     }
 
     //计算目标未来位置
@@ -179,7 +338,8 @@ private:
             Eigen::Vector3d current_target(msg.target_x_3d, msg.target_y_3d, msg.target_z_3d);
 
             // 3. 计算旋转轴（法向量）：target_frame下的“相机光心 -> R标”单位向量
-            Eigen::Vector3d normal_axis(msg.axis_x_3d, msg.axis_y_3d, msg.axis_z_3d);
+            Eigen::Vector3d normal_axis(msg.r_x_3d, msg.r_y_3d, 0);
+            //Eigen::Vector3d normal_axis(msg.axis_x_3d, msg.axis_y_3d, msg.axis_z_3d);
             if (normal_axis.norm() <= eps) {
                 normal_axis = r_center;
             }
@@ -194,10 +354,10 @@ private:
 
             // 4. 构建“半径向量”（从 R 标指向当前目标的向量）
             Eigen::Vector3d radius_vector = current_target - r_center;
-
+            radius_vector.normalized()*physical_radius_;
             // 5. 构造 3D 旋转器 (基于右手螺旋定则)
             // delta_theta 已按 spin_direction 带符号，旋转方向遵循右手定则（顺时针+逆时针-）
-            Eigen::AngleAxisd rotation(msg.spin_direction * delta_theta, normal_axis);
+            Eigen::AngleAxisd rotation(delta_theta, normal_axis);
 
             // 6. 对半径向量进行 3D 旋转
             Eigen::Vector3d pred_radius_vector = rotation * radius_vector;
@@ -215,41 +375,40 @@ private:
 
     // ---------- 弹道解算（考虑重力与空气阻力） ----------
     BallisticResult solveBallistic(double distance_xy, double distance_z) {
-        const double v0 = bullet_speed_;
-        const double g  = gravity_;
-        const double k  = air_k_;
-        const double dt = sim_dt_;
-
-        // 初值：理想抛物线
-        double v2 = v0 * v0;
+        // 第一步：理想抛物线模型热启动
+        double v2 = bullet_speed_ * bullet_speed_;
         double v4 = v2 * v2;
-        double r = std::sqrt(v4 - g * (g * distance_xy * distance_xy + 2 * distance_z * v2));
-        double pitch = std::isnan(r) ? std::atan2(distance_z, distance_xy)
-                                     : std::atan2(v2 - r, g * distance_xy);
+        double r = std::sqrt(v4 - gravity_ * (gravity_ * distance_xy * distance_xy + 2 * distance_z * v2));
+
+        double pitch;
+        if (std::isnan(r)) {
+            pitch = std::atan2(distance_z, distance_xy);
+        } else {
+            pitch = std::atan2(v2 - r, gravity_ * distance_xy);
+        }
 
         double y_aim = distance_z;
-        double t_fly = 0.0;
+        double actual_t_fly = 0.0;
 
+        // 第二步：空气阻力迭代补偿
         for (int iter = 0; iter < max_iteration_; ++iter) {
             double x = 0.0, y = 0.0, t = 0.0;
-            double vx = v0 * std::cos(pitch);
-            double vy = v0 * std::sin(pitch);
+            double vx = bullet_speed_ * std::cos(pitch);
+            double vy = bullet_speed_ * std::sin(pitch);
+            double dt = 0.005;
 
-            // 欧拉法模拟弹道
             while (x < distance_xy) {
                 double v = std::sqrt(vx*vx + vy*vy);
-                double ax = -k * v * vx;
-                double ay = -g - k * v * vy;
-                vx += ax * dt;
-                vy += ay * dt;
+                vx += (-air_k_ * v * vx) * dt;
+                vy += (-gravity_ - air_k_ * v * vy) * dt;
                 x  += vx * dt;
                 y  += vy * dt;
                 t  += dt;
-                if (t > 2.0) break;  // 防止无限循环
+                if (t > 2.0) break;
             }
 
             double error = distance_z - y;
-            t_fly = t;
+            actual_t_fly = t;
 
             if (std::abs(error) < stop_error_)
                 break;
@@ -258,20 +417,26 @@ private:
             pitch = std::atan2(y_aim, distance_xy);
         }
 
-        return {pitch, t_fly};
+        return {-pitch, actual_t_fly};
     }
 
     rclcpp::Subscription<buff_interfaces::msg::BuffAimingData>::SharedPtr aiming_sub_;
     rclcpp::Publisher<gary_msgs::msg::AutoAIM>::SharedPtr autoaim_pub_;
     rclcpp::Publisher<gary_msgs::msg::AutoAimDebug>::SharedPtr debug_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
     //debug用
     geometry_msgs::msg::Point pred_point_;
     
     std::string target_frame_;
     double bullet_speed_, shoot_delay_, physical_radius_;
     double gravity_, air_k_, converge_thresh_, sim_dt_, stop_error_;
+    double max_yaw_change_speed_, max_pitch_change_speed_;
+    rclcpp::Time last_output_time_;
+    double last_output_yaw_ = 0.0;
+    double last_output_pitch_ = 0.0;
     int max_iteration_;
     bool debug_;
+    bool has_last_output_ = false;
 };
 
 // 组件注册

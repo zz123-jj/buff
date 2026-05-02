@@ -16,6 +16,7 @@ find_package(rclcpp_components REQUIRED)
 find_package(buff_interfaces REQUIRED)
 find_package(gary_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 # 创建共享库（组件必须为 SHARED）
@@ -35,6 +36,7 @@ ament_target_dependencies(${PROJECT_NAME}
   buff_interfaces
   gary_msgs
   geometry_msgs
+  visualization_msgs
 )
 
 target_link_libraries(${PROJECT_NAME}

@@ -7,12 +7,17 @@ buff_detector_node:
       confidence_threshold: 0.70
       iou_threshold: 0.5
       debug_mode: true
-      image_reliable: true
-      inside_shade_rate: 0.7
+      image_reliable: false
+      inside_shade_rate: 0.75
       outside_shade_rate: 1.39
+      #红色
       hsv_limits:
         lower: [0, 40, 220]
         upper: [70, 255, 255]
+      #蓝色
+      #hsv_limits:
+        #lower: [100, 100, 100]
+        #upper: [124, 255, 255]
       dilate_kernel_size: 7
       max_lost_frame: 10
 
@@ -42,7 +47,7 @@ buff_estimator_node:
 buff_aimer_node:
   ros__parameters:
     ballistic:
-      bullet_speed: 23.8
+      bullet_speed: 23
       shoot_delay: 0.05
       gravity: 9.81
       air_k: 0.019
@@ -50,6 +55,9 @@ buff_aimer_node:
       sim_dt: 0.005
     aiming:
       debug: true
+      max_yaw_change_speed: 0.5
+      max_pitch_change_speed: 0.5
     frames:
       target: "odom"
     physical_radius: 0.75
+    max_iteration: 10

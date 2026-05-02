@@ -1,16 +1,17 @@
 camera_publisher:
   ros__parameters:
     # NOTE: 运行时开关
-    is_rotate: true
+    is_rotate: false
     rotate_type: 1
     # ROTATE_90_CLOCKWISE = 0, //!<Rotate 90 degrees clockwise
     # ROTATE_180 = 1, //!<Rotate 180 degrees clockwise
     # ROTATE_90_COUNTERCLOCKWISE = 2, //!<Rotate 270 degrees clockwise
-    show_params: true
+    show_params: false
 
     # NOTE: 设备 & 采集
     device:
-      serial: "FDE25070178"
+      serial: "FDE25110053"
+
 
     sensor:
       width: 1920
@@ -21,10 +22,9 @@ camera_publisher:
 
     binning: 1
     fps: 168.0
-    # exposure: 1500
-    exposure: 1300
-    #gain: 24 #red
-    gain: 21 #blue
+    exposure: 1800 # blue
+    #exposure: 2500 # red
+    gain: 20
     # NOTE: 话题 & 帧名
     camera_topic: "image_raw"
     frame_id: "camera_optical_frame"

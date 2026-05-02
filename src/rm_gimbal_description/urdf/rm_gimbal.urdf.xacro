@@ -4,7 +4,7 @@
   xmlns:xacro="http://ros.org/wiki/xacro">
 
   <xacro:arg name="camera_xyz" default="0.141 0.007 0.012" />
-  <xacro:arg name="camera_rpy" default="0 0 0" />
+  <xacro:arg name="camera_rpy" default="${-pi} 0 0" />
   <xacro:arg name="muzzle_xyz" default="0 0 0" />
   <xacro:arg name="muzzle_rpy" default="0 0 0" />
 
