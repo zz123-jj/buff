@@ -1,5 +1,4 @@
 import os
-import yaml
 import sys
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -12,8 +11,7 @@ sys.path.append(os.path.join(get_package_share_directory('rm_vision_bringup'), '
 def generate_launch_description():
 
     # Load parameters
-    launch_params = yaml.safe_load(open(os.path.join(
-        get_package_share_directory('rm_vision_bringup'), 'config', 'launch_params.yaml')))
+   
     
     # node_params = os.path.join(
     #     get_package_share_directory('rm_vision_bringup'), 'config', 'rm_auto_aim_param.yaml')
@@ -35,13 +33,13 @@ def generate_launch_description():
         package='rclcpp_components',
         executable='component_container',
         composable_node_descriptions=[
-            ComposableNode(
-                package='camera',
-                plugin='CameraPublisher',
-                name='camera_publisher',
-                parameters=[camera_param],
-                extra_arguments=[{'use_intra_process_comms': True}]
-            ),
+            # ComposableNode(
+            #     package='camera',
+            #     plugin='CameraPublisher',
+            #     name='camera_publisher',
+            #     parameters=[camera_param],
+            #     extra_arguments=[{'use_intra_process_comms': True}]
+            # ),
             # ComposableNode(
             #     package='armor_detector',
             #     plugin='rm_auto_aim::ArmorDetectorNode',
@@ -86,18 +84,20 @@ def generate_launch_description():
                 extra_arguments=[{'use_intra_process_comms': True}]
             ),
         ],
-        output='screen',
-        arguments=[
-            '--ros-args',
-            '--log-level', f'armor_detector:={launch_params["armor_detector_log_level"]}',
-            '--log-level', f'armor_tracker:={launch_params["armor_tracker_log_level"]}',
-        ]
+       
     )
     
     robot_description = Command(['xacro ', os.path.join(
-        get_package_share_directory('rm_gimbal_description'), 'urdf', 'rm_gimbal.urdf.xacro'),
-        ' camera_xyz:="', launch_params['odom2camera']['xyz'], '"',
-        ' camera_rpy:="', launch_params['odom2camera']['rpy'], '"'])
+        get_package_share_directory('rm_gimbal_description'), 'urdf', 'rm_gimbal.urdf.xacro')])
+
+    robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        parameters=[{
+            'robot_description': robot_description,
+            'publish_frequency': 1000.0,
+        }]
+    )
 
     joint_tf_publisher = Node(
         package='gimbal_tf_publisher',
@@ -106,12 +106,6 @@ def generate_launch_description():
         output='screen',
     )
 
-    robot_state_publisher = Node(
-        package='robot_state_publisher',
-        executable='robot_state_publisher',
-        parameters=[{'robot_description': robot_description,
-                    'publish_frequency': 1000.0}]
-    )
 
     return LaunchDescription([
         vision_container,

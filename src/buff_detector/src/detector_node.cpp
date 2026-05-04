@@ -180,9 +180,7 @@ private:
         // 显示调试信息
         if (detector_config_.debug_mode)
         {   
-            // cv::imshow("visualization", detector_->debug_frame_);
-            // cv::waitKey(1);
-            
+           
             // 发布调试图像到 ROS Topic
             if (!detector_->debug_frame_.empty())
             {   
@@ -195,7 +193,8 @@ private:
                 cv::resize(debug_frame, debug_frame,cv::Size(),0.5,0.5,cv::INTER_NEAREST);
                 auto debug_img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", debug_frame).toImageMsg();
                 debug_img_msg->header.stamp = frame_stamp;
-                debug_img_msg->header.frame_id = "camera";
+                //debug_img_msg->header.frame_id = "camera";
+                debug_img_msg->header.frame_id = "camera_optical_frame";
                 debug_image_pub_.publish(std::move(debug_img_msg));
             }
           if (!detector_->preprocessed_frame_.empty())
