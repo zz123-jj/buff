@@ -18,6 +18,8 @@ public:
         yaw_offset_ = read_pose_offset("yaw");
         roll_offset_ = read_pose_offset("roll");
         pitch_offset_ = read_pose_offset("pitch");
+        this->declare_parameter<double>("timestamp_offset_sec", 0.0);
+        timestamp_offset_sec_ = this->get_parameter("timestamp_offset_sec").as_double();
         angle_mapping_ = read_angle_mapping();
 
         RCLCPP_INFO(
@@ -382,7 +384,8 @@ private:
     }
 
     void quaternion_callback(const geometry_msgs::msg::Quaternion::SharedPtr msg) {
-        const auto stamp = this->now();
+        const auto stamp =
+            this->now() + rclcpp::Duration::from_seconds(timestamp_offset_sec_);
         tf2::Quaternion q(msg->x, msg->y, msg->z, msg->w);
         if (!is_valid(q)) {
             RCLCPP_WARN_THROTTLE(
@@ -433,6 +436,7 @@ private:
     PoseOffset yaw_offset_;
     PoseOffset roll_offset_;
     PoseOffset pitch_offset_;
+    double timestamp_offset_sec_{0.0};
     AngleMapping angle_mapping_;
     RypAngles last_raw_angles_;
     bool has_last_raw_angles_{false};

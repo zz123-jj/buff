@@ -105,15 +105,15 @@ private:
 
         const double current_distance_xy = std::hypot(current_point.x, current_point.y);
         double distance_3d = std::hypot(current_distance_xy, current_point.z);
-        double t_fly = distance_3d / std::max(bullet_speed_, 1e-3);
-
+        
         BallisticResult ballistic_res = solveBallistic(current_distance_xy, current_point.z);
-        pred_point_ = current_point;
+        double t_fly = ballistic_res.t_fly;
+        
         bool converged = false;
 
-        for (int iter = 0; iter < 4; ++iter) {
+        for (int iter = 0; iter < max_iteration_; ++iter) {
             // 1. 计算火控用的预测总时间（不加控制延迟）
-            double predict_delay = t_fly + msg_latency;
+            double predict_delay = t_fly + msg_latency + shoot_delay_;
 
             // 2. 预测目标在那时在哪
             geometry_msgs::msg::Point pred_odom = predictTargetPosition(*msg, predict_delay);
@@ -138,18 +138,18 @@ private:
 
         const rclcpp::Time publish_time = this->now();
         double publish_yaw = std::atan2(pred_point_.y, pred_point_.x);
-        double publish_pitch = ballistic_res.pitch;
+        double publish_pitch = -ballistic_res.pitch;
         limitOutputAngles(publish_yaw, publish_pitch, publish_time);
 
         // 发布自瞄指令
         auto autoaim_msg = std::make_unique<gary_msgs::msg::AutoAIM>();
         autoaim_msg->yaw   = static_cast<float>(publish_yaw);
-        autoaim_msg->pitch = -static_cast<float>(publish_pitch);
+        autoaim_msg->pitch = static_cast<float>(publish_pitch);
         autoaim_msg->target_distance = static_cast<float>(distance_3d);
         autoaim_msg->header.stamp = publish_time;
         autoaim_msg->header.frame_id = target_frame_;
-        autoaim_msg->shoot_command = gary_msgs::msg::AutoAIM::ALLOW_SHOOT;
-        autoaim_msg->shoot_mode = gary_msgs::msg::AutoAIM::SHOOT_MODE_AUTO;
+        autoaim_msg->shoot_command = 0;
+        autoaim_msg->shoot_mode = 0;
         autoaim_pub_->publish(std::move(autoaim_msg));
         publishTargetMarkers(*msg, pred_point_, publish_time);
 
@@ -354,7 +354,7 @@ private:
 
             // 4. 构建“半径向量”（从 R 标指向当前目标的向量）
             Eigen::Vector3d radius_vector = current_target - r_center;
-            radius_vector.normalized()*physical_radius_;
+            radius_vector = radius_vector.normalized() * physical_radius_;
             // 5. 构造 3D 旋转器 (基于右手螺旋定则)
             // delta_theta 已按 spin_direction 带符号，旋转方向遵循右手定则（顺时针+逆时针-）
             Eigen::AngleAxisd rotation(delta_theta, normal_axis);

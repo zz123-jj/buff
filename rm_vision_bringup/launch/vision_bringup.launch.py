@@ -33,13 +33,13 @@ def generate_launch_description():
         package='rclcpp_components',
         executable='component_container',
         composable_node_descriptions=[
-            # ComposableNode(
-            #     package='camera',
-            #     plugin='CameraPublisher',
-            #     name='camera_publisher',
-            #     parameters=[camera_param],
-            #     extra_arguments=[{'use_intra_process_comms': True}]
-            # ),
+            ComposableNode(
+                package='camera',
+                plugin='CameraPublisher',
+                name='camera_publisher',
+                parameters=[camera_param],
+                extra_arguments=[{'use_intra_process_comms': True}]
+            ),
             # ComposableNode(
             #     package='armor_detector',
             #     plugin='rm_auto_aim::ArmorDetectorNode',

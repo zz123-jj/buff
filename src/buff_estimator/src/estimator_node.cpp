@@ -25,6 +25,7 @@ public:
         this->declare_parameter<std::string>        ("debug_csv_path", "buff_estimator_debug.csv");
         this->declare_parameter<std::string>        ("target_frame", "odom");
         this->declare_parameter<std::string>        ("camera_frame", "camera_optical_frame");
+        this->declare_parameter<double>             ("tf_time_offset_sec", 0.0);
         this->declare_parameter<double>             ("physical_arm_length", 0.75);
         this->declare_parameter<int>                ("velocity_median_window", 3);
         this->declare_parameter<int>                ("radius_mean_window", 15);
@@ -36,6 +37,7 @@ public:
         
         target_frame_ = this->get_parameter             ("target_frame").as_string();
         camera_frame_ = this->get_parameter             ("camera_frame").as_string();
+        tf_time_offset_sec_ = this->get_parameter        ("tf_time_offset_sec").as_double();
         debug_mode_ = this->get_parameter               ("debug_mode").as_bool();
         physical_arm_length_= this->get_parameter       ("physical_arm_length").as_double();
         debug_csv_path_ = this->get_parameter           ("debug_csv_path").as_string();
@@ -120,14 +122,18 @@ private:
         
         aiming_msg.is_bigbuff = msg->is_bigbuff;
         aiming_msg.spin_direction = msg->spin_direction;
-
+        float real_radius = msg->radius;
         const float filtered_radius = radius_mean_filter_->update(msg->radius);
         aiming_msg.filter_radius = filtered_radius;
+        
         // 计算深度并转换坐标
-        const double depth = coord_solver_->computeDepthFromRadius(filtered_radius);
+        const double depth = coord_solver_->computeDepthFromRadius(real_radius);
         if (depth > 0.0) {
+            const rclcpp::Time tf_stamp =
+                rclcpp::Time(msg->header.stamp) +
+                rclcpp::Duration::from_seconds(tf_time_offset_sec_);
             geometry_msgs::msg::PointStamped r_cam;
-            r_cam.header.stamp = msg->header.stamp;
+            r_cam.header.stamp = tf_stamp;
             r_cam.header.frame_id = camera_frame_;
             r_cam.point = coord_solver_->pixelToCamera(msg->r_center_x, msg->r_center_y, depth);
             aiming_msg.r_cam_x_3d = static_cast<float>(r_cam.point.x);
@@ -136,23 +142,23 @@ private:
             aiming_msg.depth = static_cast<float>(depth);
             
             geometry_msgs::msg::PointStamped target_cam;
-            target_cam.header.stamp = msg->header.stamp;
+            target_cam.header.stamp = tf_stamp;
             target_cam.header.frame_id = camera_frame_;
             target_cam.point = coord_solver_->pixelToCamera(msg->target_center_x, msg->target_center_y, depth);
 
             geometry_msgs::msg::PointStamped target_center;
             geometry_msgs::msg::PointStamped r_center;
             geometry_msgs::msg::PointStamped camera_origin_cam;
-            camera_origin_cam.header.stamp = msg->header.stamp;
+            camera_origin_cam.header.stamp = tf_stamp;
             camera_origin_cam.header.frame_id = camera_frame_;
             camera_origin_cam.point.x = 0.0;
             camera_origin_cam.point.y = 0.0;
             camera_origin_cam.point.z = 0.0;
 
             geometry_msgs::msg::PointStamped camera_origin;
-            const bool r_ok = transformPointToTarget(r_cam, msg->header.stamp, r_center);
-            const bool target_ok = transformPointToTarget(target_cam, msg->header.stamp, target_center);
-            const bool origin_ok = transformPointToTarget(camera_origin_cam, msg->header.stamp, camera_origin);
+            const bool r_ok = transformPointToTarget(r_cam, tf_stamp, r_center);
+            const bool target_ok = transformPointToTarget(target_cam, tf_stamp, target_center);
+            const bool origin_ok = transformPointToTarget(camera_origin_cam, tf_stamp, camera_origin);
             if (target_ok&&r_ok) {
                 aiming_msg.r_x_3d = static_cast<float>(r_center.point.x);
                 aiming_msg.r_y_3d = static_cast<float>(r_center.point.y);
@@ -270,7 +276,7 @@ private:
     }
     bool transformPointToTarget(
         const geometry_msgs::msg::PointStamped& input,
-        const builtin_interfaces::msg::Time& stamp,
+        const rclcpp::Time& stamp,
         geometry_msgs::msg::PointStamped& output)
     {
         if (input.header.frame_id == target_frame_) {
@@ -363,6 +369,7 @@ private:
 
     std::string target_frame_;
     std::string camera_frame_;
+    double tf_time_offset_sec_ = 0.0;
     bool debug_mode_ = true;
     std::string debug_csv_path_ = "buff_estimator_debug.csv";
     int velocity_median_window_ = 3;
