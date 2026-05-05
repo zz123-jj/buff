@@ -299,6 +299,7 @@ bool BuffDetector::update(cv::Mat& frame)
     // 识别扇叶和R标
     bool r_box_ok = update_R_box(frame);
     bool fan_blades_ok = update_fan_blades(frame);
+   
     //防止update fan blades失败导致target_blades_空 导致front越界
     if(!target_blades_.empty()){
     buff_radius_ = euclidean_distance(current_R_box_.get_center_2f(), target_blades_.front().box.get_center_2f());

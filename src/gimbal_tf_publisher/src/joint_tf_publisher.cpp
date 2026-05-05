@@ -13,8 +13,6 @@ public:
         yaw_offset_ = read_pose_offset("yaw");
         roll_offset_ = read_pose_offset("roll");
         pitch_offset_ = read_pose_offset("pitch");
-        this->declare_parameter<double>("timestamp_offset_sec", 0.0);
-        timestamp_offset_sec_ = this->get_parameter("timestamp_offset_sec").as_double();
 
         // 订阅关节状态话题[1,2](@ref)
         subscription_ = this->create_subscription<sensor_msgs::msg::JointState>(
@@ -108,7 +106,7 @@ private:
                 this->get_logger(), *this->get_clock(), 1000,
                 "/joint_states header.stamp is zero, use receive time for gimbal TF");
         }
-        return stamp + rclcpp::Duration::from_seconds(timestamp_offset_sec_);
+        return stamp;
     }
 
     geometry_msgs::msg::TransformStamped make_transform(
@@ -134,7 +132,6 @@ private:
     PoseOffset yaw_offset_;
     PoseOffset roll_offset_;
     PoseOffset pitch_offset_;
-    double timestamp_offset_sec_{0.0};
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr subscription_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 };

@@ -25,7 +25,6 @@ public:
         this->declare_parameter<std::string>        ("debug_csv_path", "buff_estimator_debug.csv");
         this->declare_parameter<std::string>        ("target_frame", "odom");
         this->declare_parameter<std::string>        ("camera_frame", "camera_optical_frame");
-        this->declare_parameter<double>             ("tf_time_offset_sec", 0.0);
         this->declare_parameter<double>             ("physical_arm_length", 0.75);
         this->declare_parameter<int>                ("velocity_median_window", 3);
         this->declare_parameter<int>                ("radius_mean_window", 15);
@@ -37,7 +36,6 @@ public:
         
         target_frame_ = this->get_parameter             ("target_frame").as_string();
         camera_frame_ = this->get_parameter             ("camera_frame").as_string();
-        tf_time_offset_sec_ = this->get_parameter        ("tf_time_offset_sec").as_double();
         debug_mode_ = this->get_parameter               ("debug_mode").as_bool();
         physical_arm_length_= this->get_parameter       ("physical_arm_length").as_double();
         debug_csv_path_ = this->get_parameter           ("debug_csv_path").as_string();
@@ -127,11 +125,9 @@ private:
         aiming_msg.filter_radius = filtered_radius;
         
         // 计算深度并转换坐标
-        const double depth = coord_solver_->computeDepthFromRadius(real_radius);
+        const double depth = coord_solver_->computeDepthFromRadius(105);
         if (depth > 0.0) {
-            const rclcpp::Time tf_stamp =
-                rclcpp::Time(msg->header.stamp) +
-                rclcpp::Duration::from_seconds(tf_time_offset_sec_);
+            const rclcpp::Time tf_stamp = msg->header.stamp;
             geometry_msgs::msg::PointStamped r_cam;
             r_cam.header.stamp = tf_stamp;
             r_cam.header.frame_id = camera_frame_;
@@ -369,7 +365,6 @@ private:
 
     std::string target_frame_;
     std::string camera_frame_;
-    double tf_time_offset_sec_ = 0.0;
     bool debug_mode_ = true;
     std::string debug_csv_path_ = "buff_estimator_debug.csv";
     int velocity_median_window_ = 3;
