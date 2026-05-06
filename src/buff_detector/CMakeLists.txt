@@ -19,25 +19,43 @@ find_package(image_transport REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
-if(NOT OpenVINO_DIR AND EXISTS "/opt/intel/openvino_2024.6.0/runtime/cmake/OpenVINOConfig.cmake")
-  set(OpenVINO_DIR "/opt/intel/openvino_2024.6.0/runtime/cmake/" CACHE PATH "OpenVINO CMake directory")
+
+set(OPENVINO_CMAKE_CANDIDATES
+  "/usr/lib/cmake/openvino2024.6.0"
+  "/opt/intel/openvino_2024.6.0/runtime/cmake"
+  "$ENV{HOME}/.local/lib/python3.12/site-packages/openvino/cmake"
+  "$ENV{HOME}/.local/lib/python3.10/site-packages/openvino/cmake"
+)
+
+foreach(OPENVINO_CMAKE_DIR IN LISTS OPENVINO_CMAKE_CANDIDATES)
+  if(NOT OpenVINO_DIR AND EXISTS "${OPENVINO_CMAKE_DIR}/OpenVINOConfig.cmake")
+    set(OpenVINO_DIR "${OPENVINO_CMAKE_DIR}" CACHE PATH "OpenVINO CMake directory")
+  endif()
+endforeach()
+
+find_package(OpenVINO QUIET)
+
+if(NOT OpenVINO_FOUND AND NOT OpenVINO_DIR)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
 endif()
-if(NOT OpenVINO_DIR)
+if(NOT OpenVINO_FOUND AND NOT OpenVINO_DIR AND Python3_Interpreter_FOUND)
   execute_process(
-    COMMAND python3 -c "import pathlib, openvino; print(pathlib.Path(openvino.__file__).resolve().parent / 'cmake')"
+    COMMAND ${Python3_EXECUTABLE} -c "import pathlib, openvino; print(pathlib.Path(openvino.__file__).resolve().parent / 'cmake')"
     OUTPUT_VARIABLE PYTHON_OPENVINO_CMAKE
     RESULT_VARIABLE PYTHON_OPENVINO_RESULT
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_QUIET
+    TIMEOUT 5
   )
   if(PYTHON_OPENVINO_RESULT EQUAL 0 AND EXISTS "${PYTHON_OPENVINO_CMAKE}/OpenVINOConfig.cmake")
     set(OpenVINO_DIR "${PYTHON_OPENVINO_CMAKE}" CACHE PATH "OpenVINO CMake directory")
+    find_package(OpenVINO QUIET)
   endif()
 endif()
-if(NOT OpenVINO_DIR AND EXISTS "$ENV{HOME}/.local/lib/python3.10/site-packages/openvino/cmake/OpenVINOConfig.cmake")
-  set(OpenVINO_DIR "$ENV{HOME}/.local/lib/python3.10/site-packages/openvino/cmake" CACHE PATH "OpenVINO CMake directory")
+
+if(NOT OpenVINO_FOUND)
+  find_package(OpenVINO REQUIRED)
 endif()
-find_package(OpenVINO REQUIRED)
 
 # 创建共享库
 add_library(${PROJECT_NAME}_component SHARED

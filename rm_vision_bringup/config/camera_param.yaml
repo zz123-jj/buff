@@ -10,7 +10,7 @@ camera_publisher:
 
     # NOTE: 设备 & 采集
     device:
-      serial: "FDE25110053"
+      serial: "FDE25070178"
 
 
     sensor:
