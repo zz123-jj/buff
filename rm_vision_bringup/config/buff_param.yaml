@@ -1,4 +1,3 @@
-
 # -------------------- 检测节点 (buff_detector) --------------------
 buff_detector_node:
   ros__parameters:
@@ -21,9 +20,6 @@ buff_detector_node:
       dilate_kernel_size: 7
       max_lost_frame: 10
 
-
-
-
 # -------------------- 状态估计节点 (buff_estimator) --------------------
 buff_estimator_node:
   ros__parameters:
@@ -31,7 +27,7 @@ buff_estimator_node:
     camera_frame: camera_optical_frame
     debug_mode: true
     debug_csv_path: buff_estimator_debug.csv
-    physical_arm_length: 0.75
+    physical_arm_length: 0.70
     velocity_median_window: 3
     radius_mean_window: 15
     fit_window_sec: 1.5
@@ -39,9 +35,6 @@ buff_estimator_node:
     fit_offset_sum: 2.090
     fit_a_range: [0.780, 1.045]
     fit_omega_range: [1.884, 2.000]
-
-
-
 
 # -------------------- 自瞄输出节点 (buff_aimer) --------------------
 buff_aimer_node:
@@ -59,5 +52,5 @@ buff_aimer_node:
       max_pitch_change_speed: 1.0
     frames:
       target: "odom"
-    physical_radius: 0.75
+    physical_radius: 0.70
     max_iteration: 100

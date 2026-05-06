@@ -25,7 +25,7 @@ public:
         this->declare_parameter<std::string>        ("debug_csv_path", "buff_estimator_debug.csv");
         this->declare_parameter<std::string>        ("target_frame", "odom");
         this->declare_parameter<std::string>        ("camera_frame", "camera_optical_frame");
-        this->declare_parameter<double>             ("physical_arm_length", 0.75);
+        this->declare_parameter<double>             ("physical_arm_length", 0.70);
         this->declare_parameter<int>                ("velocity_median_window", 3);
         this->declare_parameter<int>                ("radius_mean_window", 15);
         this->declare_parameter<double>             ("fit_window_sec", 1.5);
@@ -375,7 +375,7 @@ private:
     float last_angle_ = 0.0f;
     double fit_start_time_ = 0.0f;
     double time_since_start_ = 0.0f;
-    double physical_arm_length_ = 0.75;
+    double physical_arm_length_ = 0.70;
 };
 
 
