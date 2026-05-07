@@ -1,47 +1,86 @@
 #include "predictor.hpp"
 #include <ceres/ceres.h>
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <limits>
 
 namespace {
 
-struct VelocitySineResidual {
-    VelocitySineResidual(double t, double y, double fit_offset_sum)
-        : t_(t), y_(y), fit_offset_sum_(fit_offset_sum) {}
+struct AngleProgressResidual {
+    AngleProgressResidual(double t, double progress, double fit_offset_sum)
+        : t_(t), progress_(progress), fit_offset_sum_(fit_offset_sum) {}
 
     template <typename T>
     bool operator()(const T* const A, const T* const omega, const T* const phi, T* residual) const {
+        const T b = T(fit_offset_sum_) - A[0];
         const T prediction =
-            A[0] * ceres::sin(omega[0] * T(t_) + phi[0]) + (T(fit_offset_sum_) - A[0]);
-        residual[0] = prediction - T(y_);
+            b * T(t_) + A[0] / omega[0] *
+                            (ceres::cos(phi[0]) -
+                             ceres::cos(omega[0] * T(t_) + phi[0]));
+        residual[0] = prediction - T(progress_);
         return true;
     }
 
 private:
     double t_;
-    double y_;
+    double progress_;
     double fit_offset_sum_;
 };
 
-}  // namespace
+double angleProgressModel(
+    const AngleSample& sample,
+    double A,
+    double omega,
+    double phi,
+    double fit_offset_sum)
+{
+    return (fit_offset_sum - A) * sample.time +
+           A / omega * (std::cos(phi) - std::cos(omega * sample.time + phi));
+}
+
+double initialGuessCost(
+    const std::vector<AngleSample>& samples,
+    double A,
+    double omega,
+    double phi,
+    double fit_offset_sum)
+{
+    double cost = 0.0;
+    for (const auto& sample : samples) {
+        const double residual =
+            angleProgressModel(sample, A, omega, phi, fit_offset_sum) -
+            static_cast<double>(sample.progress);
+        cost += residual * residual;
+    }
+    return cost;
+}
+
+}  
 
 Big_Buff_Predictor::Big_Buff_Predictor() {}
 
 void Big_Buff_Predictor::reset() {
     time_w_pairs_.clear();
+    angle_samples_.clear();
     fit_attempted_ = false;
     fit_ready_ = false;
     velocity_fit_params_.setZero();
 }
 
-bool Big_Buff_Predictor::try_fit_once_at_1p5s() {
+bool Big_Buff_Predictor::try_fit_once() {
     if (fit_attempted_) {
         return fit_ready_;
     }
 
-    if (time_w_pairs_.size() < static_cast<size_t>(fit_min_samples_)) {
+    if (angle_samples_.size() < static_cast<size_t>(fit_min_samples_)) {
+        if (!angle_samples_.empty() && angle_samples_.back().time >= fit_window_sec_ - 0.3) {
+            fit_attempted_ = true;
+        }
         return false;
     }
 
-    if (time_w_pairs_.back().first < fit_window_sec_-0.3) {
+    if (angle_samples_.back().time < fit_window_sec_-0.3) {
         return false;
     }
  
@@ -52,29 +91,68 @@ bool Big_Buff_Predictor::try_fit_once_at_1p5s() {
     double A = 0.5 * (a_lower_ + a_upper_);
     double omega = 0.5 * (omega_lower_ + omega_upper_);
     double phi = 0.0;
+    double best_cost = std::numeric_limits<double>::max();
+
+    constexpr int kAInitSteps = 5;
+    constexpr int kOmegaInitSteps = 5;
+    constexpr int kPhiInitSteps = 72;
+    for (int ai = 0; ai < kAInitSteps; ++ai) {
+        const double A_candidate =
+            a_lower_ + (a_upper_ - a_lower_) * ai / std::max(1, kAInitSteps - 1);
+        for (int oi = 0; oi < kOmegaInitSteps; ++oi) {
+            const double omega_candidate =
+                omega_lower_ +
+                (omega_upper_ - omega_lower_) * oi / std::max(1, kOmegaInitSteps - 1);
+            for (int pi = 0; pi < kPhiInitSteps; ++pi) {
+                const double phi_candidate =
+                    -M_PI + 2.0 * M_PI * pi / static_cast<double>(kPhiInitSteps);
+                const double cost = initialGuessCost(
+                    angle_samples_,
+                    A_candidate,
+                    omega_candidate,
+                    phi_candidate,
+                    fit_offset_sum_);
+                if (cost < best_cost) {
+                    best_cost = cost;
+                    A = A_candidate;
+                    omega = omega_candidate;
+                    phi = phi_candidate;
+                }
+            }
+        }
+    }
 
     ceres::Problem problem;
-    for (const auto& sample : time_w_pairs_) {
+    for (const auto& sample : angle_samples_) {
+        if (!std::isfinite(sample.time) || !std::isfinite(sample.progress)) {
+            continue;
+        }
         ceres::CostFunction* cost =
-            new ceres::AutoDiffCostFunction<VelocitySineResidual, 1, 1, 1, 1>(
-                new VelocitySineResidual(sample.first, static_cast<double>(sample.second), fit_offset_sum_));
-        problem.AddResidualBlock(cost, nullptr, &A, &omega, &phi);
+            new ceres::AutoDiffCostFunction<AngleProgressResidual, 1, 1, 1, 1>(
+                new AngleProgressResidual(
+                    sample.time,
+                    static_cast<double>(sample.progress),
+                    fit_offset_sum_));
+        problem.AddResidualBlock(cost, new ceres::HuberLoss(0.05), &A, &omega, &phi);
     }
 
     problem.SetParameterLowerBound(&A, 0, a_lower_);
     problem.SetParameterUpperBound(&A, 0, a_upper_);
     problem.SetParameterLowerBound(&omega, 0, omega_lower_);
     problem.SetParameterUpperBound(&omega, 0, omega_upper_);
-    problem.SetParameterLowerBound(&phi, 0, phi_lower_);
-    problem.SetParameterUpperBound(&phi, 0, phi_upper_);
+    problem.SetParameterLowerBound(&phi, 0, -M_PI);
+    problem.SetParameterUpperBound(&phi, 0, M_PI);
 
     ceres::Solver::Options options;
     options.linear_solver_type = ceres::DENSE_QR;
     options.max_num_iterations = 200;
-    options.minimizer_progress_to_stdout = false;
-
+    options.logging_type = ceres::PER_MINIMIZER_ITERATION;
+    options.minimizer_progress_to_stdout = true;
+    
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
+    std::cout << summary.BriefReport() << std::endl;
+    
 
     const bool success = summary.IsSolutionUsable() &&
                          std::isfinite(A) && std::isfinite(omega) && std::isfinite(phi);
@@ -100,38 +178,6 @@ float euclidean_distance(cv::Point2f p1, cv::Point2f p2){
     return std::sqrt(dx * dx + dy * dy);  
 }
 
-//将笛卡尔坐标(x,y)转换为角度（弧度）
-//返回范围：[0, 2π]，其中0°指向x轴正方向，逆时针增加
-float trans(float x, float y) {
-    // 特殊情况：x=0时，点在y轴上
-    if (x == 0.0f) {
-        if (y > 0) {
-            return M_PI / 2.0f;  // 90° (y轴正方向)
-        } else if (y < 0) {
-            return 3.0f * M_PI / 2.0f;  // 270° (y轴负方向)
-        } else {
-            return 0.0f;  // 原点
-        }
-    }
-    // 使用atan计算基础角度（返回范围：-π/2 到 π/2）
-    float angle = std::atan(y / x);
-    // 根据点所在的象限调整角度
-    if (x > 0 && y > 0) {
-        // 第一象限：角度已经正确，直接返回
-        return angle;
-    } else if (x < 0) {
-        // 第二、三象限：需要加π
-        // 因为atan只能区分上下，不能区分左右
-        return angle + M_PI;
-    } else {
-        // 第四象限和x轴正方向 (x > 0 && y <= 0)
-        if (y == 0.0f) {
-            return 0.0f;  // x轴正方向，角度为0
-        }
-        // 第四象限：需要加2π，使角度为正
-        return angle + 2.0f * M_PI;
-    }
-}
 
 //跟踪旋转目标的角度，解决角度跳变问题
 // 1. 角度连续性：从359°跳到0°时，需要识别为360°而不是跳回0
@@ -262,5 +308,3 @@ float angleObserver::update(float target_x, float target_y, float raduis) {
     last_point_.y = target_y;
     return continuous_angle;
 }
-
-

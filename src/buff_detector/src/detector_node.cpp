@@ -25,7 +25,6 @@ public:
     {
         this->declare_parameter<std::string>("model_path", "model/yolo11_buff_int8.xml");
         this->declare_parameter<std::string>("openvino_device", "GPU");
-        this->declare_parameter<bool>("use_cuda", false);
         this->declare_parameter<double>("confidence_threshold", 0.88);
         this->declare_parameter<double>("iou_threshold", 0.5);
         this->declare_parameter<bool>("debug_mode", true);
@@ -72,30 +71,31 @@ public:
         // 初始化检测器
         detector_ = std::make_unique<BuffDetector>();
         detector_->set_config(detector_config_);
-        //video_img_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/image_raw", rclcpp::QoS(rclcpp::KeepLast(1)).reliable()); 
-        // 订阅图像
-        auto image_qos = rclcpp::QoS(rclcpp::KeepLast(10));
+    
+        auto image_qos = rclcpp::QoS(rclcpp::KeepLast(1));
         if (image_reliable_) {
             image_qos.reliable();
+            image_qos.durability_volatile();
         } else {
             image_qos.best_effort();
+            image_qos.durability_volatile();
         }
         img_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-    "/image_raw",
-    image_qos,
-    [this](const sensor_msgs::msg::Image::SharedPtr msg) { 
-        imageCallback(msg); 
-    });
+        "/image_raw",
+        image_qos,
+        [this](const sensor_msgs::msg::Image::SharedPtr msg) { 
+            imageCallback(msg); 
+        });
         // 发布目标信息
-        target_pub_ = this->create_publisher<buff_interfaces::msg::BuffTarget>("/buff/target", 10);
+        target_pub_ = this->create_publisher<buff_interfaces::msg::BuffTarget>("/buff/target", rclcpp::SensorDataQoS());
 
         if (detector_config_.debug_mode) {
             debug_image_pub_ = image_transport::create_publisher(this, "/buff/debug_image");
             preprocessed_image_pub_ = image_transport::create_publisher(this, "/buff/preprocessed_image");
             roi_image_pub_ = image_transport::create_publisher(this, "/buff/roi_image");
         }
-       preprocessed_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/buff/preprocessed_image", 10);
-         fan_roi_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/buff/fan_roi_image", 10);
+        preprocessed_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/buff/preprocessed_image", rclcpp::SensorDataQoS());
+        fan_roi_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/buff/fan_roi_image", rclcpp::SensorDataQoS());
     }
 
 private:
@@ -137,14 +137,33 @@ private:
                 is_tracking_ = true;
                 RCLCPP_INFO(this->get_logger(), "Detector initialized.");
             }else{
-            RCLCPP_INFO(this->get_logger(),"Failed to initialize detector.");
-            auto msg = buff_interfaces::msg::BuffTarget();
-            set_defaultBuffTarget(msg);
-            msg.is_tracking = false;
-            msg.header.stamp = frame_stamp;
-            target_pub_->publish(msg);
+                RCLCPP_INFO(this->get_logger(),"Failed to initialize detector.");
+                auto msg = buff_interfaces::msg::BuffTarget();
+                set_defaultBuffTarget(msg);
+                msg.is_tracking = false;
+                msg.header.stamp = frame_stamp;
+                target_pub_->publish(msg);
+
+            if (detector_config_.debug_mode)
+            {   
+            // 发布调试图像到 ROS Topic
+            if (!detector_->debug_frame_.empty())
+            {   
+                auto debug_frame = frame_copy;
+                cv::circle(detector_->debug_frame_, 
+                cv::Point(detector_->debug_frame_.cols/2, detector_->debug_frame_.rows/2), 
+                4, 
+                cv::Scalar(0, 255, 0), 
+                2);
+                cv::resize(debug_frame, debug_frame,cv::Size(),0.5,0.5,cv::INTER_NEAREST);
+                auto debug_img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", debug_frame).toImageMsg();
+                debug_img_msg->header.stamp = frame_stamp;
+                debug_img_msg->header.frame_id = "camera_optical_frame";
+                debug_image_pub_.publish(std::move(debug_img_msg));
+            }
+            }
             return;
-        }}
+            }}
 
         // 更新检测
         if (is_tracking_)
@@ -186,14 +205,14 @@ private:
             {   
                 auto debug_frame = detector_->debug_frame_;
                 cv::circle(detector_->debug_frame_, 
-           cv::Point(detector_->debug_frame_.cols/2, detector_->debug_frame_.rows/2), 
-           4, 
-           cv::Scalar(0, 255, 0), 
-           2);
+                cv::Point(detector_->debug_frame_.cols/2, detector_->debug_frame_.rows/2), 
+                4, 
+                cv::Scalar(0, 255, 0), 
+                2);
                 cv::resize(debug_frame, debug_frame,cv::Size(),0.5,0.5,cv::INTER_NEAREST);
                 auto debug_img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", debug_frame).toImageMsg();
                 debug_img_msg->header.stamp = frame_stamp;
-                //debug_img_msg->header.frame_id = "camera";
+    
                 debug_img_msg->header.frame_id = "camera_optical_frame";
                 debug_image_pub_.publish(std::move(debug_img_msg));
             }

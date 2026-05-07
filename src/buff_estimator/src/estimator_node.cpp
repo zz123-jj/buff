@@ -27,12 +27,13 @@ public:
         this->declare_parameter<std::string>        ("camera_frame", "camera_optical_frame");
         this->declare_parameter<double>             ("physical_arm_length", 0.70);
         this->declare_parameter<int>                ("velocity_median_window", 3);
-        this->declare_parameter<int>                ("radius_mean_window", 15);
+        this->declare_parameter<int>                ("radius_mean_window", 60);
         this->declare_parameter<double>             ("fit_window_sec", 1.5);
         this->declare_parameter<int>                ("fit_min_samples", 15);
         this->declare_parameter<double>             ("fit_offset_sum", 2.090);
         this->declare_parameter<std::vector<double>>("fit_a_range", {0.780, 1.045});
         this->declare_parameter<std::vector<double>>("fit_omega_range", {1.884, 2.000});
+        this->declare_parameter<double>             ("depth_coeff", 1.0);
         
         target_frame_ = this->get_parameter             ("target_frame").as_string();
         camera_frame_ = this->get_parameter             ("camera_frame").as_string();
@@ -46,6 +47,8 @@ public:
         auto fit_offset_sum = this->get_parameter       ("fit_offset_sum").as_double();
         auto fit_a_range = this->get_parameter          ("fit_a_range").as_double_array();
         auto fit_omega_range = this->get_parameter      ("fit_omega_range").as_double_array();
+        depth_coeff_ = this->get_parameter          ("depth_coeff").as_double();
+
              
         predictor_ =                std::make_unique<Big_Buff_Predictor>();
          // 配置预测器拟合参数
@@ -70,11 +73,11 @@ public:
             });
         //订阅来自相机坐标系的信息
         target_sub_ = this->create_subscription<buff_interfaces::msg::BuffTarget>(
-            "/buff/target", 10,
+            "/buff/target", rclcpp::SensorDataQoS(),
             [this](const buff_interfaces::msg::BuffTarget::SharedPtr msg) { targetCallback(msg); });
 
         aiming_pub_ = this->create_publisher<buff_interfaces::msg::BuffAimingData>(
-            "/buff/aiming_data", 10);
+            "/buff/aiming_data", rclcpp::SensorDataQoS());
 
         // 接受tf
         tf_buffer_ =   std::make_shared<tf2_ros::Buffer>(this->get_clock());
@@ -114,18 +117,18 @@ private:
             last_time_since_start_ = 0.0;
             time_since_start_ = 0.0;
             last_angle_ = 0.0f;
+            fit_start_angle_ = 0.0f;
             aiming_pub_->publish(std::move(aiming_msg));
             return;
         }
         
         aiming_msg.is_bigbuff = msg->is_bigbuff;
         aiming_msg.spin_direction = msg->spin_direction;
-        float real_radius = msg->radius;
         const float filtered_radius = radius_mean_filter_->update(msg->radius);
         aiming_msg.filter_radius = filtered_radius;
         
         // 计算深度并转换坐标
-        const double depth = coord_solver_->computeDepthFromRadius(105);
+        const double depth = coord_solver_->computeDepthFromRadius(filtered_radius) * depth_coeff_;
         if (depth > 0.0) {
             const rclcpp::Time tf_stamp = msg->header.stamp;
             geometry_msgs::msg::PointStamped r_cam;
@@ -206,26 +209,48 @@ private:
             // 记录第一帧时间戳
             if (isFirst_frame_) {
                 fit_start_time_ = now;
+                fit_start_angle_ = continues_angle;
                 isFirst_frame_ = false;
             }
 
             time_since_start_ = now - fit_start_time_; // 第一帧这个值为0
-            if (!predictor_->has_fit_attempted() && time_since_start_ > 0 && time_since_start_ < predictor_->get_fit_window_sec()) {
-                double median_time = (last_time_since_start_ + time_since_start_) / 2.0;
-                float mean_angleVelocity =
-                    (continues_angle - last_angle_) / (time_since_start_ - last_time_since_start_);
-                float filtered_angle_velocity = velocity_median_filter_->update(mean_angleVelocity);
-                const std::pair<double, float> time_w_pair(median_time, std::abs(filtered_angle_velocity));
-
-                if (debug_mode_) {
-                    debug_csv_ << median_time << "," << std::abs(filtered_angle_velocity) << std::endl;
+            if (!predictor_->has_fit_attempted() && time_since_start_ < predictor_->get_fit_window_sec()) {
+                const float angle_progress = std::abs(continues_angle - fit_start_angle_);
+                if (std::isfinite(angle_progress)) {
+                    predictor_->angle_samples_.push_back(AngleSample{
+                        time_since_start_,
+                        angle_progress});
                 }
+            }
 
-                predictor_->time_w_pairs_.push_back(time_w_pair);
+            if (!predictor_->has_fit_attempted() && time_since_start_ > 0 && time_since_start_ < predictor_->get_fit_window_sec()) {
+                const double dt = time_since_start_ - last_time_since_start_;
+                if (dt > 1e-3 && dt < 0.12) {
+                    double median_time = (last_time_since_start_ + time_since_start_) / 2.0;
+                    float mean_angleVelocity =
+                        (continues_angle - last_angle_) / static_cast<float>(dt);
+                    mean_angleVelocity = std::abs(mean_angleVelocity);
+
+                    if (std::isfinite(mean_angleVelocity)) {
+                        float filtered_angle_velocity = velocity_median_filter_->update(mean_angleVelocity);
+                        const VelocitySample time_w_pair{
+                            last_time_since_start_,
+                            time_since_start_,
+                            filtered_angle_velocity};
+
+                        if (debug_mode_) {
+                            debug_csv_ << median_time << "," << filtered_angle_velocity << std::endl;
+                        }
+
+                        predictor_->time_w_pairs_.push_back(time_w_pair);
+                    }
+                }
             }
             if (!predictor_->is_completed() && time_since_start_ >= predictor_->get_fit_window_sec()) {
-                predictor_->try_fit_once_at_1p5s();
-                if(debug_mode_){
+                const bool was_fit_attempted = predictor_->has_fit_attempted();
+                predictor_->try_fit_once();
+                const bool attempted_now = !was_fit_attempted && predictor_->has_fit_attempted();
+                if(debug_mode_ && attempted_now){
                     debug_csv_<<'\n' << predictor_->get_velocity_fit_params()[0] << ","
                                      << predictor_->get_velocity_fit_params()[1] << ","
                                      << predictor_->get_velocity_fit_params()[2] << ","
@@ -264,6 +289,7 @@ private:
             last_time_since_start_ = 0.0;
             time_since_start_ = 0.0;
             last_angle_ = 0.0f;
+            fit_start_angle_ = 0.0f;
             setParaDefaultAimingMsg(aiming_msg);
         }
 
@@ -373,9 +399,11 @@ private:
     bool isFirst_frame_ = true;
     double last_time_since_start_ = 0.0f;
     float last_angle_ = 0.0f;
+    float fit_start_angle_ = 0.0f;
     double fit_start_time_ = 0.0f;
     double time_since_start_ = 0.0f;
     double physical_arm_length_ = 0.70;
+    double depth_coeff_ = 1.0; // 深度修正系数，根据实际情况调整
 };
 
 

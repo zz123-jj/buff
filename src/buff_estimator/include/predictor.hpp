@@ -9,10 +9,22 @@
 #include "dataProcessor.hpp"
 using namespace Eigen;
 
+struct VelocitySample {
+    double start_time;
+    double end_time;
+    float velocity;
+};
+
+struct AngleSample {
+    double time;
+    float progress;
+};
+
 class Big_Buff_Predictor {
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-        std::vector<std::pair<double,float>> time_w_pairs_;  //时间角速度对 
+        std::vector<VelocitySample> time_w_pairs_;  //时间区间角速度样本
+        std::vector<AngleSample> angle_samples_;     //时间累计角度样本
         private:
         bool fit_attempted_ = false;//是否已经尝试过拟合
         bool fit_ready_ = false;//是否拟合完成并准备好预测结果
@@ -24,13 +36,11 @@ class Big_Buff_Predictor {
         double a_upper_ = 1.045;
         double omega_lower_ = 1.884;
         double omega_upper_ = 2.000;
-        double phi_lower_ = -M_PI;
-        double phi_upper_ = M_PI;
 
     public:
     Big_Buff_Predictor();
     void reset();
-    bool try_fit_once_at_1p5s();
+    bool try_fit_once();
     bool is_completed() const { return fit_ready_; }
     bool has_fit_attempted() const { return fit_attempted_; }
     void set_fit_config(
@@ -53,9 +63,9 @@ class Big_Buff_Predictor {
     Vector4f get_velocity_fit_params() const { return velocity_fit_params_; }
     float get_fit_buffer_duration_sec() const
     {
-        return time_w_pairs_.empty() ? 0.0f : static_cast<float>(time_w_pairs_.back().first);
+        return angle_samples_.empty() ? 0.0f : static_cast<float>(angle_samples_.back().time);
     }
-    int get_fit_data_point_count() const { return static_cast<int>(time_w_pairs_.size()); }
+    int get_fit_data_point_count() const { return static_cast<int>(angle_samples_.size()); }
     double get_fit_window_sec() const { return fit_window_sec_; }
     };
     

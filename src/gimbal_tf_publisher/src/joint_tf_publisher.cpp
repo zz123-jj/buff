@@ -74,7 +74,7 @@ private:
             return;
         }
 
-        const auto stamp = get_joint_state_stamp(*msg);
+        const auto stamp = this->now();
         std::vector<geometry_msgs::msg::TransformStamped> transforms;
 
         tf2::Quaternion q_yaw, q_roll, q_pitch;
@@ -95,18 +95,6 @@ private:
 
         // 发布TF变换[5](@ref)
         tf_broadcaster_->sendTransform(transforms);
-    }
-
-    rclcpp::Time get_joint_state_stamp(const sensor_msgs::msg::JointState& msg) {
-        const rclcpp::Time msg_stamp(msg.header.stamp);
-        rclcpp::Time stamp = msg_stamp;
-        if (msg_stamp.nanoseconds() == 0) {
-            stamp = this->now();
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(), *this->get_clock(), 1000,
-                "/joint_states header.stamp is zero, use receive time for gimbal TF");
-        }
-        return stamp;
     }
 
     geometry_msgs::msg::TransformStamped make_transform(
