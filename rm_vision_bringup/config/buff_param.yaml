@@ -15,7 +15,7 @@ buff_detector_node:
         upper: [70, 255, 255]
       #蓝色
       #hsv_limits:
-        #lower: [100, 100, 100]
+        #lower: [100, 100, 100] 
         #upper: [124, 255, 255]
       dilate_kernel_size: 7
       max_lost_frame: 10
@@ -28,7 +28,6 @@ buff_estimator_node:
     debug_mode: true
     debug_csv_path: buff_estimator_debug.csv
     physical_arm_length: 0.70
-    depth_scale: 1.0
     velocity_median_window: 3
     radius_mean_window: 15
     fit_window_sec: 1.2
@@ -36,6 +35,7 @@ buff_estimator_node:
     fit_offset_sum: 2.090
     fit_a_range: [0.780, 1.045]
     fit_omega_range: [1.884, 2.000]
+    depth_coeff: 0.95
 
 # -------------------- 自瞄输出节点 (buff_aimer) --------------------
 buff_aimer_node:
@@ -44,7 +44,7 @@ buff_aimer_node:
       bullet_speed: 20.5
       shoot_delay: 0.4
       gravity: 9.81
-      air_k: 0.000
+      air_k: 0.0191
       converge_thresh: 0.002
       sim_dt: 0.005
     aiming:
