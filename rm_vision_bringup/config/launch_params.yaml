@@ -1,0 +1,38 @@
+odom2yaw:
+  xyz: "\"0.0 0.0 0.0\""
+  rpy: "\"0.0 0.0 0.0\""
+
+yaw2roll:
+  xyz: "\"0.0 0.0 0.0\""
+  rpy: "\"0.0 0.0 0.0\""
+
+roll2pitch:
+  xyz: "\"0.0 0.0 0.0\""
+  rpy: "\"0.0 0.0 0.0\""
+
+gimbal2camera:
+  xyz: "\"0.015 0.0  0.0984\""
+  rpy: "\"0.0  0.0  0.0\""
+
+gimbal2muzzle:
+  xyz: "\"0.0516 0.0 0.0\""
+  rpy: "\"0.0 0.0 0.0\""
+
+gimbal_tf_source: quaternion
+
+quaternion_to_gimbal:
+  input_x_axis: "roll"
+  input_y_axis: "pitch"
+  input_z_axis: "yaw"
+  decomposition_order: rpy
+  roll_source: roll
+  yaw_source: yaw
+  pitch_source: pitch
+  roll_sign: 0.0
+  yaw_sign: 1.0
+  pitch_sign: -1.0
+
+armor_detector_log_level: INFO
+armor_tracker_log_level: INFO
+serial_log_level: INFO
+auto_record_log_level: INFO

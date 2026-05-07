@@ -1,0 +1,25 @@
+contact_node:
+  ros__parameters:
+    pid:
+      yaw:
+        kp: 0.7
+        ki: 0.08
+        kd: 1.5
+        i_max: 10.0
+        i_min: -10.0
+      pitch:
+        kp: 0.35
+        ki: 0.03
+        kd: 0.0
+        i_max: 10.0
+        i_min: -10.0
+    filter:
+      yaw_cutoff: 10020.0
+    rx:
+      timerwall_ms: 2
+      verbose: true
+    tx:
+      verbose: true
+    port:
+      name: "/dev/ttyACM0"
+      baudrate: 115200

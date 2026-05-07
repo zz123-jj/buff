@@ -1,0 +1,57 @@
+# -------------------- 检测节点 (buff_detector) --------------------
+buff_detector_node:
+  ros__parameters:
+      model_path: model/yolo11_buff_int8.xml
+      openvino_device: GPU
+      confidence_threshold: 0.70
+      iou_threshold: 0.5
+      debug_mode: true
+      image_reliable: true
+      inside_shade_rate: 0.75
+      outside_shade_rate: 1.39
+      #红色
+      hsv_limits:
+        lower: [0, 40, 220]
+        upper: [70, 255, 255]
+      #蓝色
+      #hsv_limits:
+        #lower: [100, 100, 100] 
+        #upper: [124, 255, 255]
+      dilate_kernel_size: 7
+      max_lost_frame: 10
+
+# -------------------- 状态估计节点 (buff_estimator) --------------------
+buff_estimator_node:
+  ros__parameters:
+    target_frame: odom
+    camera_frame: camera_optical_frame
+    debug_mode: true
+    debug_csv_path: buff_estimator_debug.csv
+    physical_arm_length: 0.70
+    velocity_median_window: 3
+    radius_mean_window: 90
+    fit_window_sec: 1.5
+    fit_min_samples: 10
+    fit_offset_sum: 2.090
+    fit_a_range: [0.780, 1.045]
+    fit_omega_range: [1.884, 2.000]
+    depth_coeff: 1.0
+
+# -------------------- 自瞄输出节点 (buff_aimer) --------------------
+buff_aimer_node:
+  ros__parameters:
+    ballistic:
+      bullet_speed: 21.5
+      shoot_delay: 0.4
+      gravity: 9.81
+      air_k: 0.0191
+      converge_thresh: 0.002
+      sim_dt: 0.005
+    aiming:
+      debug: true
+      max_yaw_change_speed: 1.0
+      max_pitch_change_speed: 1.0
+    frames:
+      target: "odom"
+    physical_radius: 0.70
+    max_iteration: 100

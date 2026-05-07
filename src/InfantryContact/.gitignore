@@ -1,0 +1,14 @@
+build
+install
+log
+install
+.cache
+build
+build/.cache
+build/contact
+build/contact/.cmake
+log/
+cmake
+topic_list.txt
+compile_commands.json
+todo.txt
